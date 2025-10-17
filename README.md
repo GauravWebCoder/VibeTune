@@ -3,6 +3,12 @@
 <div align="center">
   <img src="public/VIBETUNE FULL.png" alt="VibeTune Full Logo" width="400"/>
   
+  <br><br>
+  
+  <img src="public/VibeTune WBG.png" alt="VibeTune Logo" width="200"/>
+  
+  <br><br>
+  
   **Real-time Music Synchronization Platform**
   
   *Listen together, stay in sync, create memories*
