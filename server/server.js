@@ -195,6 +195,16 @@ io.on('connection', (socket) => {
   });
 });
 
+// Root endpoint
+app.get('/', (req, res) => {
+  res.json({ 
+    message: 'VibeTune API Server is running!',
+    status: 'ok',
+    rooms: rooms.size,
+    timestamp: new Date().toISOString()
+  });
+});
+
 // Health check endpoint
 app.get('/health', (req, res) => {
   res.json({ 
@@ -290,5 +300,5 @@ const PORT = process.env.PORT || 3001;
 
 server.listen(PORT, () => {
   // console.log('🚀 Socket.IO server running on port:', PORT);
-  // console.log('🌐 Health check: http://localhost:' + PORT + '/health');
+  // console.log('🌐 Health check: https://vibetune-production.up.railway.app/health');
 });

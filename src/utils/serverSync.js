@@ -5,7 +5,7 @@ class ServerSync {
     this.pollInterval = null;
     this.listeners = new Map();
     this.lastUpdate = 0;
-    this.serverUrl = 'http://localhost:3001';
+    this.serverUrl = 'https://vibetune-production.up.railway.app';
     this.isConnected = false;
     this.lastRequestTime = 0;
     this.requestCooldown = 50; // 0.05 seconds between requests for instant sync

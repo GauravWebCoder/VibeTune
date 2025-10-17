@@ -1194,8 +1194,8 @@ export default function Room() {
               Retry
             </button>
           )}
-        </div>
-      </div>
+                </div>
+          </div>
 
       <div className="room-content">
         <div className="room-main">
@@ -1263,8 +1263,8 @@ export default function Room() {
               </div>
                 ))
             )}
+            </div>
         </div>
-      </div>
       </div>
 
         <div className="room-sidebar">
@@ -1295,18 +1295,18 @@ export default function Room() {
               ))}
               <div ref={messagesEndRef} />
             </div>
-            <div className="chat-input">
-              <input
-                type="text"
+        <div className="chat-input">
+          <input
+            type="text"
                 placeholder="Type a message..."
-                value={newMessage}
-                onChange={(e) => setNewMessage(e.target.value)}
+            value={newMessage}
+              onChange={(e) => setNewMessage(e.target.value)}
                 onKeyPress={(e) => e.key === 'Enter' && sendMessage()}
-              />
+          />
               <button onClick={sendMessage}>Send</button>
             </div>
-          </div>
         </div>
+      </div>
       </div>
     </div>
   );
