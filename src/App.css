@@ -2471,9 +2471,10 @@ body::before {
     flex: none !important;
     max-width: 100% !important;
     overflow-x: hidden !important;
-    max-height: calc(100vh - 140px);
+    max-height: calc(100vh - 200px); /* Increased height for better visibility */
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
+    min-height: 400px; /* Ensure minimum height for chat */
   }
   
   .sidebar {
@@ -2624,7 +2625,7 @@ body::before {
     border-radius: var(--border-radius);
     padding: var(--spacing-md);
     padding-bottom: 160px; /* More space for mobile player */
-    min-height: 200px;
+    min-height: 300px; /* Increased minimum height for better chat visibility */
     max-width: 100% !important;
     overflow-x: hidden !important;
     display: flex;
@@ -2849,7 +2850,7 @@ body::before {
     border-radius: var(--border-radius);
     padding: var(--spacing-md);
     padding-bottom: 160px; /* More space for mobile player */
-    min-height: 200px;
+    min-height: 300px; /* Increased minimum height for better chat visibility */
     max-width: 100% !important;
     overflow-x: hidden !important;
     display: flex;
@@ -3040,7 +3041,7 @@ body::before {
     border-radius: var(--border-radius);
     padding: var(--spacing-md);
     padding-bottom: 160px; /* More space for mobile player */
-    min-height: 200px;
+    min-height: 300px; /* Increased minimum height for better chat visibility */
     max-width: 100% !important;
     overflow-x: hidden !important;
     display: flex;
