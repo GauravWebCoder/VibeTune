@@ -1,41 +1,151 @@
 // Server-based sync system using HTTP requests
+import { io } from 'socket.io-client';
+
 class ServerSync {
   constructor() {
     this.roomId = null;
     this.pollInterval = null;
     this.listeners = new Map();
     this.lastUpdate = 0;
-    this.serverUrl = 'https://vibetune-production.up.railway.app';
+    // Prefer Vite env, fallback to Railway deployment
+    this.serverUrl = (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_SOCKET_SERVER_URL)
+      ? import.meta.env.VITE_SOCKET_SERVER_URL
+      : 'https://vibetune-production.up.railway.app';
     this.isConnected = false;
     this.lastRequestTime = 0;
-    this.requestCooldown = 50; // 0.05 seconds between requests for instant sync
+    this.requestCooldown = 100; // 0.1 seconds between requests for better responsiveness
+    this.socket = null;
+    this.user = null;
+    this.lastDeliveredCurrentTime = null;
+    this.lastIsPlaying = null;
+    this.lastSongId = null;
+    this.lastSocketTickAt = 0;
+  }
+  
+  sanitizeSongData(song) {
+    if (!song || typeof song !== 'object') return null;
+    const {
+      id,
+      title,
+      artist,
+      thumbnail,
+      duration,
+      url,
+      permanentUrl,
+      ytId
+    } = song;
+    return {
+      id,
+      title,
+      artist,
+      thumbnail: thumbnail || '/music img.png',
+      duration,
+      permanentUrl,
+      url: (typeof url === 'string' && /^https?:\/\//.test(url)) ? url : undefined,
+      ytId
+    };
   }
 
-  async joinRoom(roomId) {
+  sanitizeQueue(queue) {
+    if (!Array.isArray(queue)) return [];
+    return queue.map(s => this.sanitizeSongData(s)).filter(Boolean);
+  }
+
+  async joinRoom(roomId, user) {
     // Joining room
     this.roomId = roomId;
+    this.user = user || this.user;
+    this.lastDeliveredCurrentTime = null;
+    this.lastIsPlaying = null;
+    this.lastSongId = null;
     
-    try {
-      // Test connection to server
-      const response = await fetch(`${this.serverUrl}/health`);
-      if (response.ok) {
-        this.isConnected = true;
-        // Connected to server
-        this.startPolling();
-      } else {
-        // Server not available, using fallback
-        this.isConnected = false;
-      }
-    } catch (error) {
-      // Server connection failed, using fallback
-      this.isConnected = false;
-    }
+    await this.ensureSocket();
+    // Always keep lightweight polling active for tick currentTime, even with socket
+    this.startPolling();
   }
 
   leaveRoom() {
     // Leaving room
     this.roomId = null;
     this.stopPolling();
+    if (this.socket) {
+      try { this.socket.disconnect(); } catch {}
+      this.socket = null;
+    }
+  }
+
+  async ensureSocket() {
+    if (this.socket && this.socket.connected) return;
+    try {
+      // Test connection via HTTP first
+      const response = await fetch(`${this.serverUrl}/health`);
+      this.isConnected = response.ok;
+    } catch (_) {
+      this.isConnected = false;
+    }
+
+    try {
+      this.socket = io(this.serverUrl, {
+        transports: ['websocket', 'polling'],
+      });
+
+      this.socket.on('connect', () => {
+        this.isConnected = true;
+        // prefer socket, stop polling
+        this.stopPolling();
+        // Join room with minimal user info
+        if (this.roomId) {
+          const safeUser = this.user || {};
+          this.socket.emit('join_room', {
+            roomId: this.roomId,
+            user: {
+              id: safeUser.id || 'anon',
+              username: safeUser.username || 'Anonymous',
+              avatar: safeUser.avatar || '/music img.png'
+            }
+          });
+        }
+      });
+
+      this.socket.on('room_state', (state) => {
+        // Normalize and notify
+        const data = {
+          ...state,
+          queue: this.sanitizeQueue(state?.queue || []),
+          currentSong: this.sanitizeSongData(state?.currentSong),
+          type: 'room_state'
+        };
+        this.notifyListeners('roomUpdate', data);
+      });
+
+      this.socket.on('sync_event', (evt) => {
+        const { type, payload } = evt || {};
+        if (!type) return;
+        this.lastSocketTickAt = Date.now();
+        const normalized = {
+          type,
+          isPlaying: type === 'play' ? true : type === 'pause' ? false : undefined,
+          currentTime: payload?.currentTime ?? payload?.currentPosition,
+          duration: payload?.duration,
+          timestamp: Date.now()
+        };
+        if (payload?.currentSong) {
+          normalized.currentSong = this.sanitizeSongData(payload.currentSong);
+        }
+        if (Array.isArray(payload?.queue)) {
+          normalized.queue = this.sanitizeQueue(payload.queue);
+        }
+        this.notifyListeners('roomUpdate', normalized);
+      });
+
+      this.socket.on('disconnect', () => {
+        this.isConnected = false;
+        // restart fallback polling
+        this.startPolling();
+      });
+    } catch (_) {
+      // ignore socket errors; fallback to HTTP
+    }
   }
 
   startPolling() {
@@ -44,7 +154,7 @@ class ServerSync {
     // Starting polling
     this.pollInterval = setInterval(() => {
       this.checkForUpdates();
-    }, 200); // Poll every 0.2 seconds for instant sync
+    }, 500); // Poll every 0.5 seconds for better responsiveness
   }
 
   stopPolling() {
@@ -57,6 +167,11 @@ class ServerSync {
 
   async checkForUpdates() {
     if (!this.roomId) return;
+    // Avoid duplicate ticks within 600ms after a socket event
+    if (this.socket && this.socket.connected) {
+      const sinceSocket = Date.now() - (this.lastSocketTickAt || 0);
+      if (sinceSocket < 600) return;
+    }
 
     // Rate limiting to prevent too many requests
     const now = Date.now();
@@ -71,22 +186,19 @@ class ServerSync {
         if (response.ok) {
           const roomData = await response.json();
           const timestamp = Date.now();
-          
-          if (timestamp > this.lastUpdate) {
-            // Only process updates if there's actual content or if it's the first update
-            const hasContent = roomData.currentSong || roomData.queue?.length > 0 || roomData.users?.length > 0;
-            const isFirstUpdate = this.lastUpdate === 0;
-            
-            if (hasContent || isFirstUpdate) {
-              if (hasContent) {
-                // Found server update
-              }
-              this.lastUpdate = timestamp;
-              this.notifyListeners('roomUpdate', roomData);
-            } else {
-              // Skip empty room updates to prevent console spam
-              this.lastUpdate = timestamp;
-            }
+          const isFirstUpdate = this.lastUpdate === 0;
+          const currentTimeVal = Number(roomData.currentTime) || 0;
+          const songId = roomData.currentSong && roomData.currentSong.id ? String(roomData.currentSong.id) : null;
+          const playingChanged = this.lastIsPlaying !== null && this.lastIsPlaying !== !!roomData.isPlaying;
+          const songChanged = this.lastSongId !== null && this.lastSongId !== songId;
+          const timeChanged = this.lastDeliveredCurrentTime === null || Math.abs(currentTimeVal - this.lastDeliveredCurrentTime) >= 0.25;
+
+          if (timestamp > this.lastUpdate && (isFirstUpdate || playingChanged || songChanged || timeChanged)) {
+            this.lastUpdate = timestamp;
+            this.lastDeliveredCurrentTime = currentTimeVal;
+            this.lastIsPlaying = !!roomData.isPlaying;
+            this.lastSongId = songId;
+            this.notifyListeners('roomUpdate', { ...roomData, type: 'tick' });
           }
         } else if (response.status === 404) {
           // Room not found, creating room
@@ -120,7 +232,7 @@ class ServerSync {
         if (data.timestamp > this.lastUpdate) {
           // Found localStorage update
           this.lastUpdate = data.timestamp;
-          this.notifyListeners('roomUpdate', data);
+          this.notifyListeners('roomUpdate', { ...data, type: data.type || 'tick' });
         }
       }
     } catch (error) {
@@ -133,6 +245,17 @@ class ServerSync {
     
     // Broadcasting play/pause
     
+    if (this.socket && this.socket.connected) {
+      try {
+        this.socket.emit('sync_event', {
+          roomId: this.roomId,
+          type: isPlaying ? 'play' : 'pause',
+          payload: { currentSong: this.sanitizeSongData(currentSong) || null }
+        });
+        return;
+      } catch (_) {}
+    }
+
     if (this.isConnected) {
       // Try to use server first
       try {
@@ -144,7 +267,7 @@ class ServerSync {
           body: JSON.stringify({
             roomId: this.roomId,
             type: 'playPause',
-            data: { isPlaying, currentSong }
+            data: { isPlaying, currentSong: this.sanitizeSongData(currentSong) || null }
           })
         });
         
@@ -170,6 +293,17 @@ class ServerSync {
     
     // Broadcasting song change
     
+    if (this.socket && this.socket.connected) {
+      try {
+        this.socket.emit('sync_event', {
+          roomId: this.roomId,
+          type: 'song_change',
+          payload: { currentSong: this.sanitizeSongData(song) }
+        });
+        return;
+      } catch (_) {}
+    }
+
     if (this.isConnected) {
       try {
         const response = await fetch(`${this.serverUrl}/sync`, {
@@ -180,7 +314,7 @@ class ServerSync {
           body: JSON.stringify({
             roomId: this.roomId,
             type: 'songChange',
-            data: { currentSong: song, isPlaying: true }
+            data: { currentSong: this.sanitizeSongData(song), isPlaying: true }
           })
         });
         
@@ -204,14 +338,19 @@ class ServerSync {
   async broadcastSeek(currentTime) {
     if (!this.roomId) return;
     
-    // Don't broadcast seek updates for 0 position unless it's intentional
-    if (currentTime === 0) {
-      // Skipping seek broadcast for position 0
-      return;
-    }
-    
     // Broadcasting seek
     
+    if (this.socket && this.socket.connected) {
+      try {
+        this.socket.emit('sync_event', {
+          roomId: this.roomId,
+          type: 'seek',
+          payload: { currentTime }
+        });
+        return;
+      } catch (_) {}
+    }
+
     if (this.isConnected) {
       try {
         const response = await fetch(`${this.serverUrl}/sync`, {
@@ -247,6 +386,17 @@ class ServerSync {
     
     // Broadcasting queue update
     
+    if (this.socket && this.socket.connected) {
+      try {
+        this.socket.emit('sync_event', {
+          roomId: this.roomId,
+          type: 'queue_update',
+          payload: { queue: this.sanitizeQueue(queue) }
+        });
+        return;
+      } catch (_) {}
+    }
+
     if (this.isConnected) {
       try {
         const response = await fetch(`${this.serverUrl}/sync`, {
@@ -257,7 +407,7 @@ class ServerSync {
           body: JSON.stringify({
             roomId: this.roomId,
             type: 'queueUpdate',
-            data: { queue: queue }
+            data: { queue: this.sanitizeQueue(queue) }
           })
         });
         

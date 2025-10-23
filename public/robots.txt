@@ -1,0 +1,6 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://vibetune-mu.vercel.app/sitemap.xml
+
+

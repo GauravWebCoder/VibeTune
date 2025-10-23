@@ -1062,6 +1062,7 @@ body::before {
 
 .chat-input input {
   flex: 1;
+  min-width: 0; /* allow shrinking in flex so the send button stays visible */
   padding: 15px 20px;
   border: 1px solid rgba(255, 255, 255, 0.2);
   border-radius: 25px;
@@ -1070,6 +1071,10 @@ body::before {
   font-size: 14px;
   backdrop-filter: blur(10px);
   transition: all 0.3s ease;
+}
+
+.chat-input button {
+  flex-shrink: 0; /* prevent button from shrinking off-screen */
 }
 
 .chat-input input::placeholder {
@@ -1193,12 +1198,13 @@ body::before {
   bottom: 0;
   left: 0;
   right: 0;
-  background: rgba(0, 0, 0, 0.95);
+  background: linear-gradient(135deg, #0f0f0f 0%, #1a1a1a 50%, #2d2d2d 100%);
   backdrop-filter: blur(25px);
-  border-top: 1px solid rgba(255, 255, 255, 0.1);
-  padding: 20px 25px;
+  border-top: 1px solid rgba(29, 185, 84, 0.3);
+  padding: 24px 32px;
   z-index: 1000;
-  box-shadow: 0 -10px 30px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.6), 0 -2px 8px rgba(29, 185, 84, 0.1);
+  border-radius: 20px 20px 0 0;
 }
 
 .spotify-player-content {
@@ -1217,24 +1223,31 @@ body::before {
 }
 
 .spotify-artwork {
-  width: 60px;
-  height: 60px;
+  width: 70px;
+  height: 70px;
   border-radius: 12px;
   object-fit: cover;
-  box-shadow: 0 8px 25px rgba(0, 0, 0, 0.3);
+  box-shadow: 0 8px 25px rgba(0, 0, 0, 0.4), 0 2px 8px rgba(29, 185, 84, 0.2);
+  transition: all 0.3s ease;
+}
+
+.spotify-artwork:hover {
+  transform: scale(1.05);
+  box-shadow: 0 12px 35px rgba(0, 0, 0, 0.5), 0 4px 12px rgba(29, 185, 84, 0.3);
 }
 
 .spotify-song-details h4 {
-  font-size: 16px;
-  margin-bottom: 5px;
+  font-size: 18px;
+  margin-bottom: 6px;
   color: #ffffff;
-  font-weight: 600;
+  font-weight: 700;
+  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
 }
 
 .spotify-song-details p {
-  font-size: 14px;
-  color: rgba(255, 255, 255, 0.7);
-  font-weight: 400;
+  font-size: 15px;
+  color: rgba(255, 255, 255, 0.8);
+  font-weight: 500;
 }
 
 .spotify-center-section {
@@ -1251,7 +1264,7 @@ body::before {
   gap: 20px;
 }
 
-.spotify-control-btn, .spotify-play-btn {
+.spotify-control-btn {
   background: none;
   border: none;
   color: #b3b3b3;
@@ -1260,61 +1273,232 @@ body::before {
   display: flex;
   align-items: center;
   justify-content: center;
-}
-
-.spotify-control-btn:hover {
-  color: #ffffff;
-  transform: scale(1.1);
-}
-
-.spotify-play-btn {
-  width: 60px;
-  height: 60px;
+  padding: 12px;
   border-radius: 50%;
-  background: linear-gradient(135deg, #1db954, #1ed760);
-  color: #000000;
-  box-shadow: 
-    0 8px 25px rgba(29, 185, 84, 0.4),
-    inset 0 1px 0 rgba(255, 255, 255, 0.2);
   position: relative;
   overflow: hidden;
 }
 
-.spotify-play-btn::before {
+.spotify-control-btn::before, .spotify-play-btn::before {
   content: '';
   position: absolute;
   top: 0;
-  left: -100%;
-  width: 100%;
-  height: 100%;
-  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.3), transparent);
-  transition: left 0.5s;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(29, 185, 84, 0.1);
+  border-radius: 50%;
+  opacity: 0;
+  transition: opacity 0.3s ease;
 }
 
-.spotify-play-btn:hover::before {
-  left: 100%;
+.spotify-control-btn:hover::before, .spotify-play-btn:hover::before {
+  opacity: 1;
 }
 
-.spotify-play-btn:hover {
-  transform: scale(1.1);
+.spotify-control-btn:hover {
+  color: #ffffff;
+  transform: scale(1.15);
+  text-shadow: 0 0 8px rgba(29, 185, 84, 0.5);
+}
+
+.spotify-play-btn {
+  width: 65px;
+  height: 65px;
+  border-radius: 50%;
+  background-color: #1db954 !important; /* force solid green base */
+  background-image: linear-gradient(135deg, #1db954, #1ed760) !important; /* green gradient on desktop */
+  color: #ffffff;
   box-shadow: 
-    0 15px 35px rgba(29, 185, 84, 0.6),
+    0 8px 25px rgba(29, 185, 84, 0.5),
+    0 2px 8px rgba(0, 0, 0, 0.3),
     inset 0 1px 0 rgba(255, 255, 255, 0.3);
+  position: relative;
+  overflow: visible; /* allow outer glow to be visible */
+  font-size: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  outline: none;
+  padding: 0;
+  -webkit-appearance: none;
+  appearance: none;
+  transition: transform 240ms cubic-bezier(0.22, 0.61, 0.36, 1),
+              box-shadow 320ms cubic-bezier(0.22, 0.61, 0.36, 1);
+  will-change: transform, box-shadow;
+  backface-visibility: hidden;
+  transform: translateZ(0);
+}
+
+.spotify-play-btn::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: radial-gradient(circle at 30% 30%, #1ed760 0%, #1db954 60%, #19a64c 100%);
+  z-index: 0;
+}
+
+/* Soft outer glow/aura behind the play button */
+.spotify-play-btn::before {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 120%;
+  height: 120%;
+  transform: translate(-50%, -50%) scale(1);
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(30,215,96,0.45) 0%, rgba(29,185,84,0.25) 45%, rgba(29,185,84,0.0) 70%);
+  filter: blur(14px);
+  opacity: 0.35;
+  pointer-events: none;
+  z-index: -1;
+  transition: transform 320ms cubic-bezier(0.22, 0.61, 0.36, 1),
+              opacity 240ms cubic-bezier(0.22, 0.61, 0.36, 1),
+              filter 320ms cubic-bezier(0.22, 0.61, 0.36, 1);
+  will-change: transform, opacity, filter;
+}
+
+.spotify-play-btn svg {
+  position: relative;
+  z-index: 1;
+  pointer-events: none;
+}
+
+/* Extra specificity to override any generic button styles */
+.spotify-controls .spotify-play-btn {
+  background-color: #1db954 !important;
+  background-image: linear-gradient(135deg, #1db954, #1ed760) !important;
+  width: 65px !important;
+  height: 65px !important;
+}
+
+.spotify-play-btn:active,
+.spotify-play-btn:focus {
+  background-color: #1db954 !important;
+  background-image: linear-gradient(135deg, #1db954, #1ed760) !important;
+}
+
+/* Subtle shine only for hover devices */
+@media (hover: hover) and (pointer: fine) {
+  .spotify-play-btn::before {
+    /* intensify aura smoothly on hover */
+    opacity: 0.5;
+    transform: translate(-50%, -50%) scale(1.07);
+  }
+  .spotify-play-btn:hover {
+    transform: scale(1.04);
+    box-shadow: 
+      0 15px 35px rgba(29, 185, 84, 0.7),
+      0 4px 12px rgba(0, 0, 0, 0.4),
+      inset 0 1px 0 rgba(255, 255, 255, 0.4);
+  }
+}
+
+/* On touch devices, keep it stable and green (no hover animations) */
+@media (hover: none) and (pointer: coarse) {
+  .spotify-play-btn {
+    transform: none !important;
+    box-shadow: 
+      0 8px 25px rgba(29, 185, 84, 0.5),
+      0 2px 8px rgba(0, 0, 0, 0.3),
+      inset 0 1px 0 rgba(255, 255, 255, 0.3) !important;
+  }
+  .spotify-play-btn::before {
+    opacity: 0.35;
+    transform: translate(-50%, -50%) scale(1);
+  }
 }
 
 .spotify-progress-section {
   width: 100%;
-  max-width: 500px;
+  max-width: 680px;
+}
+
+.spotify-progress-container {
+  position: relative;
+  width: 100%;
+  height: 8px;
+  background: #535353;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.spotify-progress-fill {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  background: linear-gradient(90deg, #1db954 0%, #1ed760 100%);
+  border-radius: 4px;
+  transition: width 0.05s linear;
+  z-index: 1;
+  will-change: width;
 }
 
 .spotify-progress-bar {
   width: 100%;
-  height: 6px;
+  height: 8px;
   background: rgba(255, 255, 255, 0.2);
-  border-radius: 3px;
+  border-radius: 4px;
   cursor: pointer;
   position: relative;
   transition: all 0.3s ease;
+  -webkit-appearance: none;
+  appearance: none;
+  outline: none;
+}
+
+.spotify-progress-bar::-webkit-slider-track {
+  background: linear-gradient(to right, #1ed760 var(--progress-percentage), #535353 var(--progress-percentage));
+  height: 8px;
+  border-radius: 4px;
+  -webkit-appearance: none;
+}
+
+.spotify-progress-bar::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  background: #ffffff;
+  border-radius: 50%;
+  cursor: pointer;
+  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.4), 0 0 0 2px #1db954;
+  transition: all 0.2s ease;
+  border: 2px solid #1db954;
+}
+
+.spotify-progress-bar::-webkit-slider-thumb:hover {
+  transform: scale(1.3);
+  box-shadow: 0 6px 16px rgba(29, 185, 84, 0.6), 0 0 0 3px rgba(29, 185, 84, 0.3);
+  border-color: #1ed760;
+}
+
+.spotify-progress-bar::-moz-range-track {
+  background: linear-gradient(to right, #1ed760 var(--progress-percentage), #535353 var(--progress-percentage));
+  height: 8px;
+  border-radius: 4px;
+  border: none;
+}
+
+.spotify-progress-bar::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  background: #ffffff;
+  border-radius: 50%;
+  cursor: pointer;
+  border: 2px solid #1db954;
+  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.4), 0 0 0 2px #1db954;
+  transition: all 0.2s ease;
+}
+
+.spotify-progress-bar::-moz-range-thumb:hover {
+  transform: scale(1.3);
+  box-shadow: 0 6px 16px rgba(29, 185, 84, 0.6), 0 0 0 3px rgba(29, 185, 84, 0.3);
+  border-color: #1ed760;
 }
 
 .spotify-progress-bar:hover {
@@ -1378,6 +1562,13 @@ body::before {
 
 .spotify-volume-slider-container {
   width: 120px;
+}
+
+/* PC users - wider sound bar */
+@media (min-width: 768px) {
+  .spotify-volume-slider-container {
+    width: 200px;
+  }
 }
 
 .spotify-volume-slider {
@@ -1453,6 +1644,34 @@ body::before {
   
   .spotify-center-section {
     order: -1;
+  }
+}
+
+/* Laptop responsiveness: widen center progress and reduce paddings slightly */
+@media (min-width: 1024px) and (max-width: 1440px) {
+  .spotify-player-bar {
+    padding: 18px 24px;
+  }
+  .spotify-progress-section {
+    max-width: 820px;
+  }
+  .spotify-artwork {
+    width: 60px;
+    height: 60px;
+  }
+  /* Improve horizontal spacing; avoid squished center on 1440 */
+  .spotify-player-content {
+    max-width: 1200px;
+    padding: 0 12px;
+  }
+  .room-container {
+    margin: 0 auto;
+  }
+  .room-main {
+    padding: 24px;
+  }
+  .room-sidebar {
+    padding: 24px;
   }
 }
 
@@ -2017,6 +2236,22 @@ body::before {
   .main-content {
     padding: var(--spacing-xl);
   }
+  /* Keep consistent player spacing on 2K/4K too */
+  .main-content {
+    padding-bottom: 160px;
+  }
+  .room-sidebar {
+    padding-bottom: 160px;
+  }
+  .room-container {
+    max-width: 1800px;
+  }
+  .spotify-player-content {
+    max-width: 1680px;
+  }
+  .spotify-progress-section {
+    max-width: 1100px;
+  }
   
   .room-main {
     display: flex;
@@ -2087,7 +2322,8 @@ body::before {
   
   .room-sidebar {
     width: 400px;
-    height: 600px;
+    max-height: calc(100vh - 220px);
+    overflow-y: auto;
     flex-shrink: 0;
   }
   
@@ -2130,8 +2366,8 @@ body::before {
     border: 1px solid rgba(255, 255, 255, 0.1);
     padding: var(--spacing-md);
     margin-bottom: var(--spacing-md);
-    min-height: 400px;
-    max-height: 60vh;
+    min-height: auto; /* avoid large empty area below items on 1440px */
+    max-height: none;
     display: flex;
     flex-direction: column;
   }
@@ -2152,10 +2388,10 @@ body::before {
   
   .queue-list {
     flex: 1;
-    overflow-y: auto;
+    overflow-y: visible;
     padding-right: var(--spacing-sm);
-    max-height: 35vh;
-    min-height: 150px;
+    max-height: none;
+    min-height: auto;
   }
   
   .queue-list::-webkit-scrollbar {
@@ -2187,6 +2423,15 @@ body::before {
     width: 300px;
     height: 500px;
     flex-shrink: 0;
+  }
+
+  /* Prevent footer player from overlapping content on laptop L (1440px) */
+  .main-content {
+    padding-bottom: 140px; /* reserve space for player */
+  }
+  .room-sidebar {
+    padding-bottom: 140px; /* ensure chat bottom controls stay visible */
+    min-height: calc(100vh - 160px);
   }
 }
 
@@ -2226,6 +2471,9 @@ body::before {
     flex: none !important;
     max-width: 100% !important;
     overflow-x: hidden !important;
+    max-height: calc(100vh - 140px);
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
   }
   
   .sidebar {
@@ -2343,9 +2591,12 @@ body::before {
     border-radius: var(--border-radius);
     border: 1px solid rgba(255, 255, 255, 0.1);
     padding: var(--spacing-md);
-    padding-bottom: 180px; /* More space for mobile player */
+    padding-bottom: 220px; /* more space for fixed player on tablets */
     position: relative;
     min-height: calc(100vh - 200px);
+    max-height: calc(100vh - 140px);
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
   }
   
   /* Users section styling */
@@ -2379,6 +2630,9 @@ body::before {
     display: flex;
     flex-direction: column;
     flex: 1;
+    max-height: calc(100vh - 220px);
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
   }
   
   .chat-section h3 {
@@ -2391,6 +2645,7 @@ body::before {
     flex: 1;
     overflow-y: auto;
     margin-bottom: var(--spacing-sm);
+    max-height: none;
   }
   
   .chat-input {
@@ -2564,6 +2819,9 @@ body::before {
     padding-bottom: 180px; /* More space for mobile player */
     position: relative;
     min-height: calc(100vh - 200px);
+    max-height: calc(100vh - 140px);
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
   }
   
   /* Users section styling */
@@ -2959,6 +3217,27 @@ body::before {
   .room-container::before,
   .queue-item::before {
     background-size: 200% 200%;
+  }
+}
+
+/* 4K and ultra-wide screens */
+@media (min-width: 2560px) {
+  .room-container {
+    max-width: min(92vw, 2200px);
+  }
+  .spotify-player-content {
+    max-width: min(92vw, 1900px);
+  }
+  .spotify-progress-section {
+    max-width: 1300px;
+  }
+  /* Ensure sidebar (users + chat) scrolls fully on 4K */
+  .room-sidebar {
+    max-height: calc(100vh - 240px);
+    overflow-y: auto;
+  }
+  .chat-section {
+    max-height: none;
   }
 }
 
@@ -3478,32 +3757,114 @@ body::before {
 
 /* Remove hover effects on touch devices */
 @media (hover: none) and (pointer: coarse) {
+  /* Disable hover visuals across interactive elements */
+  .nav-link:hover,
+  .btn-primary:hover,
+  .btn-secondary:hover,
+  .search-result:hover,
   .queue-item:hover,
+  .action-card:hover,
+  .play-btn:hover,
+  .queue-next-btn:hover,
+  .delete-btn:hover,
+  .spotify-control-btn:hover,
+  .spotify-play-btn:hover,
+  .spotify-artwork:hover,
+  .spotify-progress-bar:hover,
+  .spotify-volume-slider:hover,
   .chat-message:hover,
   .user-item:hover,
-  .btn:hover,
-  .control-btn:hover,
-  .play-pause-btn:hover {
-    transform: none;
-    box-shadow: none;
-    background: inherit;
+  .social-link:hover,
+  .hamburger-menu:hover {
+    transform: none !important;
+    box-shadow: none !important;
+    background: inherit !important;
+    color: inherit !important;
   }
-  
-  /* Add active states for touch */
+
+  /* Remove shimmer/shine ::before animations on touch */
+  .btn-primary::before,
+  .btn-secondary::before,
+  .play-btn::before,
+  .queue-next-btn::before,
+  .delete-btn::before,
+  .nav-link::before,
+  .search-result::before,
+  .action-card::before,
+  .spotify-play-btn::before {
+    display: none !important;
+    content: none !important;
+  }
+
+  /* Reduce heavy blur for better GPU performance on low-end devices */
+  .sidebar,
+  .room-container,
+  .chat-messages,
+  .spotify-player-bar,
+  .footer {
+    backdrop-filter: blur(10px) !important;
+  }
+
+  /* Reduce transition overhead */
+  .nav-link,
+  .btn,
+  .btn-primary,
+  .btn-secondary,
+  .queue-item,
+  .search-result,
+  .action-card,
+  .spotify-control-btn,
+  .spotify-play-btn,
+  .spotify-progress-fill,
+  .spotify-volume-slider,
+  .hamburger-menu {
+    transition: none !important;
+  }
+
+  /* Increase tap targets for range inputs */
+  .spotify-progress-bar::-webkit-slider-thumb,
+  .spotify-volume-slider::-webkit-slider-thumb {
+    width: 24px !important;
+    height: 24px !important;
+  }
+  .spotify-progress-bar::-moz-range-thumb,
+  .spotify-volume-slider::-moz-range-thumb {
+    width: 24px !important;
+    height: 24px !important;
+  }
+
+  /* Avoid height changes on hover for progress/volume */
+  .spotify-progress-bar,
+  .spotify-volume-slider {
+    height: 8px !important;
+  }
+
+  /* Add tactile active states */
   .queue-item:active {
     transform: scale(0.98);
-    background: rgba(29, 185, 84, 0.2);
+    background: rgba(29, 185, 84, 0.18);
   }
-  
   .btn:active,
-  .control-btn:active,
-  .play-pause-btn:active {
-    transform: scale(0.95);
-    background: rgba(29, 185, 84, 0.8);
+  .play-btn:active,
+  .queue-next-btn:active,
+  .delete-btn:active,
+  .spotify-control-btn:active,
+  .spotify-play-btn:active,
+  .hamburger-menu:active {
+    transform: scale(0.96);
   }
-  
-  .chat-message:active {
-    background: rgba(255, 255, 255, 0.05);
+
+  /* Disable decorative float animation on current item */
+  .queue-item.current {
+    animation: none !important;
+  }
+
+  /* Remove tap highlight */
+  * { -webkit-tap-highlight-color: transparent; }
+
+  /* Make progress thumb visible without hover */
+  .spotify-progress-thumb {
+    opacity: 1 !important;
   }
 }
 

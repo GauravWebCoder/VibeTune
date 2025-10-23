@@ -57,6 +57,9 @@ export default function Room() {
   const lastSeekTimeRef = useRef(0);
   const queueRef = useRef(queue);
   const lastPlayPauseSyncRef = useRef(0);
+  const isLeaderRef = useRef(false);
+  const latestRoomDataRef = useRef(null);
+  const lastRemoteAdjustRef = useRef(0);
   
   // Update refs when values change
   useEffect(() => {
@@ -88,6 +91,20 @@ export default function Room() {
     };
   }, [user, roomId, resetPlayback]);
 
+  // Determine leader (earliest joined user) and expose to window
+  useEffect(() => {
+    try {
+      if (roomUsers && roomUsers.length > 0 && user) {
+        const sorted = [...roomUsers].sort((a, b) => new Date(a.joined_at) - new Date(b.joined_at));
+        const leaderId = sorted[0]?.user_id;
+        isLeaderRef.current = leaderId === user.id;
+        window.roomRole = { isLeader: isLeaderRef.current };
+      }
+    } catch (_) {
+      // ignore
+    }
+  }, [roomUsers, user]);
+
   // Auto-scroll chat to bottom when messages change
   useEffect(() => {
     if (messagesEndRef.current) {
@@ -106,28 +123,23 @@ export default function Room() {
   useEffect(() => {
     // Setting up server sync
     
-    // Join the room
-    serverSync.joinRoom(roomId);
+    // Join the room with user info for socket presence
+    serverSync.joinRoom(roomId, {
+      id: user?.id,
+      username: user?.username,
+      avatar: user?.avatar || '/music img.png'
+    });
     
-    // Set up progress bar sync (every 0.3 seconds for instant sync)
-    const progressSyncInterval = setInterval(() => {
-      if (audioRef.current && isPlayingRef.current && currentSongRef.current) {
-        const currentTime = audioRef.current.currentTime;
-        if (Math.abs(currentTime - (lastSeekTimeRef.current || 0)) > 0.5) {
-          lastSeekTimeRef.current = currentTime;
-          if (window.roomSync) {
-            window.roomSync.broadcastSeek(currentTime);
-          }
-        }
-      }
-    }, 300);
+    // Disable periodic progress hints to prevent loops
+    const progressSyncInterval = null;
     
     // Listen for room updates
     const unsubscribe = serverSync.on('roomUpdate', (data) => {
       // Process updates silently
+      latestRoomDataRef.current = data;
       
-      // Handle play/pause updates - ONLY if we have a valid currentSong
-      if (typeof data.isPlaying === 'boolean' && data.isPlaying !== isPlayingRef.current && data.currentSong && data.currentSong.id) {
+      // Handle play/pause updates
+      if (typeof data.isPlaying === 'boolean' && data.isPlaying !== isPlayingRef.current) {
         const now = Date.now();
         if (now - lastPlayPauseSyncRef.current < 100) { // 0.1 second debounce
         return;
@@ -153,37 +165,28 @@ export default function Room() {
           audioRef.current.currentTime = 0;
         }
         
-        if (data.isPlaying) {
-          setTimeout(() => {
-            playRef.current();
-            // Sync to current position if available
-            if (data.currentTime && data.currentTime > 0) {
-              audioRef.current.currentTime = data.currentTime;
-            }
-          }, 200);
-        }
-      }
-      
-      // IGNORE null/empty currentSong from remote updates
-      if (data.currentSong === null || data.currentSong === undefined) {
-        return;
-      }
-      
-      // Handle seek updates - IGNORE position 0 resets from remote
-      if (data.currentTime !== undefined && data.currentTime > 0) {
-        if (audioRef.current) {
-          const timeDiff = Math.abs(audioRef.current.currentTime - data.currentTime);
-          // Only sync if difference is more than 1 second
-          if (timeDiff > 1) {
+        // Fallback auto-play: if we're supposed to be playing but still paused, try to start after load
+        setTimeout(() => {
+          if (isPlayingRef.current && audioRef.current && audioRef.current.paused) {
+            try { playRef.current(); } catch {}
+          }
+          if (data.currentTime && data.currentTime > 0 && audioRef.current) {
             audioRef.current.currentTime = data.currentTime;
           }
-        }
+        }, 250);
+      }
+      
+      // Do not touch audio time here; FooterPlayer exclusively manages time to avoid loops
+      
+      // Call server sync callback for progress bar
+      if (window.roomSyncServerCallback) {
+        window.roomSyncServerCallback(data);
       }
       
       // IGNORE position 0 resets from remote updates
       
-      // Handle queue updates - ONLY if we have songs and it's different
-      if (data.queue && Array.isArray(data.queue) && data.queue.length > 0) {
+      // Handle queue updates - apply even when empty so joiners see clears
+      if (data.queue && Array.isArray(data.queue)) {
         const currentQueue = queueRef.current;
         const isDifferent = data.queue.length !== currentQueue.length || 
           data.queue.some((song, index) => !currentQueue[index] || song.id !== currentQueue[index].id);
@@ -210,6 +213,14 @@ export default function Room() {
       },
       broadcastQueueUpdate: (queue) => {
         serverSync.broadcastQueueUpdate(queue);
+      },
+      onServerSync: (callback) => {
+        // Store callback for progress bar sync
+        window.roomSyncServerCallback = callback;
+        // Immediately deliver latest room data if available
+        if (latestRoomDataRef.current) {
+          try { callback(latestRoomDataRef.current); } catch (_) {}
+        }
       }
     };
     
@@ -223,7 +234,9 @@ export default function Room() {
     // Room controls set for footer player
 
     return () => {
-      clearInterval(progressSyncInterval);
+      if (progressSyncInterval) {
+        clearInterval(progressSyncInterval);
+      }
       unsubscribe();
       serverSync.leaveRoom();
       delete window.roomSync;
@@ -483,13 +496,8 @@ export default function Room() {
         }
       }
     
-    // Update seek position - IGNORE position 0 to prevent resets
-    if (data.current_position !== undefined && data.current_position > 0 && audioRef.current) {
-      const timeDiff = Math.abs(audioRef.current.currentTime - data.current_position);
-      if (timeDiff > 2) { // Only seek if difference is more than 2 seconds
-        audioRef.current.currentTime = data.current_position;
-        }
-      }
+    // Disable Supabase-driven seeks to prevent conflicts with socket/server clock
+    // FooterPlayer handles all seek application via socket events
       
     // Update queue
     if (data.queue && Array.isArray(data.queue)) {
@@ -560,8 +568,43 @@ export default function Room() {
   
   
   const loadRoomState = async () => {
-    // Skip Supabase - use local state only
-    // Room state will be managed by serverSync
+    try {
+      const { data, error } = await supabase
+        .from('rooms')
+        .select('queue')
+        .eq('id', roomId)
+        .single();
+
+      if (!error && data && Array.isArray(data.queue)) {
+        const sanitizeSong = (song) => {
+          if (!song || typeof song !== 'object') return null;
+          const { id, title, artist, thumbnail, duration, url, permanentUrl, ytId } = song;
+          return {
+            id,
+            title,
+            artist,
+            thumbnail: thumbnail || '/music img.png',
+            duration,
+            url: (typeof url === 'string' && /^https?:\/\//.test(url)) ? url : undefined,
+            permanentUrl,
+            ytId
+          };
+        };
+
+        const sanitizedQueue = data.queue.map(sanitizeSong).filter(Boolean);
+
+        const currentQueue = queueRef.current || [];
+        const isDifferent = sanitizedQueue.length !== currentQueue.length || 
+          sanitizedQueue.some((song, index) => !currentQueue[index] || song.id !== currentQueue[index].id);
+
+        if (isDifferent) {
+          queueRef.current = sanitizedQueue;
+          updateQueue(sanitizedQueue);
+        }
+      }
+    } catch (_) {
+      // ignore load errors
+    }
   };
   
   const loadRoomUsers = async () => {
@@ -922,6 +965,8 @@ export default function Room() {
       play();
       if (window.roomSync) {
         window.roomSync.broadcastSongChange(song);
+        // Immediately align everyone to start of the new song
+        window.roomSync.broadcastSeek(0);
         window.roomSync.broadcastPlayPause(true);
       }
     }, 50);

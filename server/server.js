@@ -34,7 +34,8 @@ function getRoom(roomId) {
       queue: [],
       currentSong: null,
       isPlaying: false,
-      currentTime: 0
+      currentTime: 0, // base position (seconds)
+      startedAt: null // server ms when play started (null if paused)
     });
   }
   return rooms.get(roomId);
@@ -48,6 +49,15 @@ function broadcastToRoom(roomId, event, data, excludeSocket = null) {
       io.to(socketId).emit(event, data);
     }
   });
+}
+
+// Compute live position based on server clock
+function getComputedCurrentTime(room) {
+  if (room.isPlaying && typeof room.startedAt === 'number') {
+    const elapsedMs = Date.now() - room.startedAt;
+    return Math.max(0, room.currentTime + elapsedMs / 1000);
+  }
+  return Math.max(0, room.currentTime);
 }
 
 // Socket.IO connection handling
@@ -72,7 +82,7 @@ io.on('connection', (socket) => {
     const roomState = {
       queue: room.queue,
       isPlaying: room.isPlaying,
-      currentTime: room.currentTime,
+      currentTime: getComputedCurrentTime(room),
       users: Array.from(room.users.values())
     };
     
@@ -110,13 +120,22 @@ io.on('connection', (socket) => {
         if (payload.currentSong) {
           room.currentSong = payload.currentSong;
         }
+        // Start server clock from current base position
+        room.startedAt = Date.now();
         break;
       case 'pause':
+        // Freeze position based on elapsed time, then pause
+        room.currentTime = getComputedCurrentTime(room);
+        room.startedAt = null;
         room.isPlaying = false;
         break;
       case 'seek':
         if (payload.currentTime !== undefined) {
-          room.currentTime = payload.currentTime;
+          room.currentTime = Math.max(0, Number(payload.currentTime) || 0);
+          // Keep clock continuity if playing
+          if (room.isPlaying) {
+            room.startedAt = Date.now();
+          }
         }
         break;
       case 'queue_update':
@@ -128,15 +147,28 @@ io.on('connection', (socket) => {
         if (payload.currentSong) {
           room.currentSong = payload.currentSong;
         }
+        room.currentTime = 0;
+        if (room.isPlaying) {
+          room.startedAt = Date.now();
+        }
         break;
     }
 
     // Broadcast to other users in room
     broadcastToRoom(roomId, 'sync_event', {
       type,
-      payload,
+      payload: { ...payload, currentTime: payload?.currentTime ?? payload?.currentPosition },
       fromUserId: room.users.get(socket.id)?.id
     }, socket.id);
+
+    // Also send a consolidated room_state snapshot back to the sender
+    io.to(socket.id).emit('room_state', {
+      queue: room.queue,
+      currentSong: room.currentSong,
+      isPlaying: room.isPlaying,
+      currentTime: getComputedCurrentTime(room),
+      users: Array.from(room.users.values())
+    });
   });
 
   // Handle chat messages
@@ -231,9 +263,10 @@ app.get('/room/:roomId', (req, res) => {
     roomData.currentSong = room.currentSong;
   }
   
-  // Only include currentTime if it's meaningful (not 0 or if song is playing)
-  if (room.currentTime > 0 || room.isPlaying) {
-    roomData.currentTime = room.currentTime;
+  // Include computed currentTime when meaningful
+  const computed = getComputedCurrentTime(room);
+  if (computed > 0 || room.isPlaying) {
+    roomData.currentTime = computed;
   }
   
   res.json(roomData);
@@ -258,6 +291,14 @@ app.post('/sync', (req, res) => {
         if (room.isPlaying !== data.isPlaying) {
           // console.log(`🔄 Server: Updating play state from ${room.isPlaying} to ${data.isPlaying}`);
           room.isPlaying = data.isPlaying;
+          if (room.isPlaying) {
+            // starting playback: start server clock
+            room.startedAt = Date.now();
+          } else {
+            // pausing: freeze position based on elapsed time
+            room.currentTime = getComputedCurrentTime(room);
+            room.startedAt = null;
+          }
         }
       }
       if (data.currentSong && Object.keys(data.currentSong).length > 0) {
@@ -271,11 +312,15 @@ app.post('/sync', (req, res) => {
         room.currentSong = data.currentSong;
         room.isPlaying = true;
         room.currentTime = 0;
+        room.startedAt = Date.now();
       }
       break;
     case 'seek':
       if (data.currentPosition !== undefined) {
-        room.currentTime = data.currentPosition;
+        room.currentTime = Math.max(0, Number(data.currentPosition) || 0);
+        if (room.isPlaying) {
+          room.startedAt = Date.now();
+        }
       }
       break;
     case 'queueUpdate':

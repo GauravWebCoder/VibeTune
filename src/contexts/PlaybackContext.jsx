@@ -31,13 +31,37 @@ export const PlaybackProvider = ({ children }) => {
     spotifyDuration
   } = useSpotify();
 
-  // Initialize audio element with native device speakers (like Beatsync.gg)
+  // Initialize audio element - optimized for low-end devices
   useEffect(() => {
     if (!audioRef.current) {
       audioRef.current = new Audio();
       audioRef.current.crossOrigin = 'anonymous';
-      audioRef.current.preload = 'none'; // Don't preload to save memory
-      audioRef.current.volume = 1.0; // Use native device volume
+      audioRef.current.preload = 'metadata'; // Load metadata only
+      audioRef.current.volume = 1.0;
+      
+      // Detect low-end device
+      const hardwareThreads = navigator.hardwareConcurrency || 8;
+      const net = navigator.connection;
+      const isLowEndDevice = hardwareThreads <= 4 || (net && (net.saveData || /(^|slow-)?2g/.test(net.effectiveType || '')));
+      
+      if (isLowEndDevice) {
+        // Throttle timeupdate for low-end devices
+        let lastTimeUpdate = 0;
+        let lastSyncTime = 0;
+        audioRef.current.addEventListener('timeupdate', () => {
+          const now = Date.now();
+          if (now - lastTimeUpdate < 200) return; // 5fps max for low-end
+          lastTimeUpdate = now;
+          
+          // Prevent sync loops on low-end devices
+          if (now - lastSyncTime < 1000) return; // Max 1 sync per second
+          lastSyncTime = now;
+        });
+        
+        // Reduce audio quality for low-end devices
+        audioRef.current.preload = 'none';
+        audioRef.current.crossOrigin = 'anonymous';
+      }
     }
     const audio = audioRef.current;
     if (!audio) return;
@@ -125,8 +149,8 @@ export const PlaybackProvider = ({ children }) => {
       audioRef.current.pause();
       setIsPlaying(false);
     } else {
-      audioRef.current.play().catch(// console.error);
-      setIsPlaying(true));
+      audioRef.current.play().catch(() => {});
+      setIsPlaying(true);
     }
   }, [isPlaying]);
 

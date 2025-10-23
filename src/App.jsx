@@ -1,5 +1,5 @@
 import { BrowserRouter, Routes, Route, NavLink, useLocation, useNavigate } from "react-router-dom";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import Room from "./pages/Room";
 import Home from "./pages/Home";
 import ErrorBoundary from "./components/ErrorBoundary";
@@ -126,34 +126,95 @@ function Sidebar({ sidebarOpen, setSidebarOpen }) {
 
 function FooterPlayer() {
   const { currentSong, isPlaying, togglePlayPause, skipNext, skipPrevious, audioRef } = usePlayback();
-  const [currentTime, setCurrentTime] = useState(0);
+  const [currentTime, setCurrentTime] = useState(0); // displayed time (UI)
   const [duration, setDuration] = useState(0);
   const [volume, setVolume] = useState(0.7);
+  const [isDragging, setIsDragging] = useState(false);
+  const lastLocalSeekRef = useRef(0);
+  const lastServerTimeRef = useRef(0);
+  const lastAppliedFromServerRef = useRef(0);
+  const lastDragBroadcastRef = useRef(0);
 
-  // Update progress bar
+  const commitSeek = () => {
+    if (!audioRef.current || duration <= 0) return;
+    const finalTime = Math.max(0, Math.min(duration, currentTime));
+    lastLocalSeekRef.current = Date.now();
+    audioRef.current.currentTime = finalTime;
+    if (window.roomSync) {
+      window.roomSync.broadcastSeek(finalTime);
+    }
+  };
+
+  // Update duration and periodically pull currentTime from audio (avoids UI jitter)
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio) return;
 
-    const updateTime = () => {
-      setCurrentTime(audio.currentTime);
-      setDuration(audio.duration || 0);
-    };
-
-    const updateDuration = () => {
-      setDuration(audio.duration || 0);
-    };
-
-    audio.addEventListener('timeupdate', updateTime);
+    const updateDuration = () => setDuration(audio.duration || 0);
     audio.addEventListener('loadedmetadata', updateDuration);
     audio.addEventListener('durationchange', updateDuration);
 
+    let rafId;
+    const loop = () => {
+      if (!isDragging) {
+        setCurrentTime(audio.currentTime || 0);
+      }
+      rafId = requestAnimationFrame(loop);
+    };
+    rafId = requestAnimationFrame(loop);
+
     return () => {
-      audio.removeEventListener('timeupdate', updateTime);
       audio.removeEventListener('loadedmetadata', updateDuration);
       audio.removeEventListener('durationchange', updateDuration);
+      if (rafId) cancelAnimationFrame(rafId);
     };
-  }, [audioRef, currentSong]);
+  }, [audioRef, currentSong, isDragging]);
+
+  // Server sync: apply explicit seeks; for ticks only adjust UI forward, never backward
+  useEffect(() => {
+    if (window.roomSync && window.roomSync.onServerSync) {
+      window.roomSync.onServerSync((data) => {
+        if (data?.currentTime !== undefined) {
+          const audio = audioRef.current;
+          if (!audio) return;
+
+          const now = Date.now();
+          const eventType = data?.type;
+          const serverTime = Math.max(0, Number(data.currentTime) || 0);
+
+          // Explicit seeks: apply both directions immediately (always trust server)
+          if (eventType === 'seek') {
+            if (now - lastLocalSeekRef.current < 600) return; // ignore our echo
+            audio.currentTime = serverTime;
+            setCurrentTime(serverTime);
+            lastServerTimeRef.current = serverTime;
+            lastAppliedFromServerRef.current = now;
+            return;
+          }
+
+          // Periodic ticks: update UI only; never move UI backward to avoid jitter
+          if (!isDragging) {
+            const localTime = audio.currentTime || 0;
+            const forwardDrift = serverTime - localTime;
+            // If very ahead, snap forward audio
+            if (forwardDrift >= 3 && (now - lastAppliedFromServerRef.current > 2500)) {
+              audio.currentTime = serverTime;
+              lastAppliedFromServerRef.current = now;
+              setCurrentTime(serverTime);
+              lastServerTimeRef.current = serverTime;
+            } else if (forwardDrift > 0.35) {
+              // Only advance UI forward to reduce to-and-fro
+              setCurrentTime(serverTime);
+              lastServerTimeRef.current = serverTime;
+            }
+          }
+        }
+        if (data.duration !== undefined) {
+          setDuration(data.duration);
+        }
+      });
+    }
+  }, [isDragging]);
 
   // Simple sync - no complex event listeners needed
 
@@ -285,9 +346,65 @@ function FooterPlayer() {
           </div>
           
           <div className="spotify-progress-section">
-            <div className="spotify-progress-bar" onClick={handleProgressClick}>
-              <div className="spotify-progress-fill" style={{ width: `${progressPercentage}%` }}></div>
-              <div className="spotify-progress-thumb" style={{ left: `${progressPercentage}%` }}></div>
+            <div className="spotify-progress-container">
+              <div 
+                className="spotify-progress-fill" 
+                style={{ width: `${progressPercentage}%` }}
+              ></div>
+              <input
+                type="range"
+                min="0"
+                max="100"
+                value={progressPercentage}
+              onChange={(e) => {
+                if (audioRef.current && duration > 0) {
+                  const newTime = (e.target.value / 100) * duration;
+                  setCurrentTime(newTime);
+                  lastLocalSeekRef.current = Date.now();
+                  audioRef.current.currentTime = newTime;
+                  // Commit on change for keyboard users
+                  if (window.roomSync) {
+                    window.roomSync.broadcastSeek(newTime);
+                  }
+                }
+              }}
+              onInput={(e) => {
+                if (audioRef.current && duration > 0) {
+                  const newTime = (e.target.value / 100) * duration;
+                  setCurrentTime(newTime);
+                  // live scrub locally, no broadcast
+                  lastLocalSeekRef.current = Date.now();
+                  audioRef.current.currentTime = newTime;
+                  // Throttled live broadcast for realtime sync while dragging
+                  const now = Date.now();
+                  if (now - lastDragBroadcastRef.current > 120) {
+                    lastDragBroadcastRef.current = now;
+                    if (window.roomSync) {
+                      window.roomSync.broadcastSeek(newTime);
+                    }
+                  }
+                }
+              }}
+              onMouseDown={() => setIsDragging(true)}
+              onMouseUp={() => { setIsDragging(false); commitSeek(); }}
+              onTouchStart={() => setIsDragging(true)}
+              onTouchEnd={() => { setIsDragging(false); commitSeek(); }}
+                className="spotify-progress-bar"
+                style={{
+                  width: '100%',
+                  height: '8px',
+                  background: `linear-gradient(to right, #1ed760 ${progressPercentage}%, #535353 ${progressPercentage}%)`,
+                  outline: 'none',
+                  cursor: 'pointer',
+                  WebkitAppearance: 'none',
+                  appearance: 'none',
+                  touchAction: 'pan-x',
+                  position: 'absolute',
+                  top: 0,
+                  left: 0,
+                  zIndex: 2
+                }}
+              />
             </div>
             <div className="spotify-time-display">
               <span className="spotify-current-time">{formatTime(currentTime)}</span>
