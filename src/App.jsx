@@ -125,7 +125,7 @@ function Sidebar({ sidebarOpen, setSidebarOpen }) {
 }
 
 function FooterPlayer() {
-  const { currentSong, isPlaying, togglePlayPause, skipNext, skipPrevious, audioRef } = usePlayback();
+  const { currentSong, isPlaying, togglePlayPause, skipNext, skipPrevious, audioRef, shuffleMode, toggleShuffle } = usePlayback();
   const [currentTime, setCurrentTime] = useState(0); // displayed time (UI)
   const [duration, setDuration] = useState(0);
   const [volume, setVolume] = useState(0.7);
@@ -294,7 +294,16 @@ function FooterPlayer() {
         {/* Center Section - Controls & Progress */}
         <div className="spotify-center-section">
           <div className="spotify-controls">
-            
+            <button
+              className={`spotify-control-btn ${shuffleMode ? 'active' : ''}`}
+              onClick={toggleShuffle}
+              title="Shuffle"
+              aria-pressed={shuffleMode}
+            >
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M16 3h5v5h-2V6.41l-3.29 3.3-1.42-1.42L17.59 5H16V3zM4 6h4.59l4.7 4.7-1.42 1.42L7.17 8H4V6zm0 12v-2h3.17l3.29-3.29 1.42 1.42L7.59 18H4zm12 0v-2h1.59l-3.3-3.29 1.42-1.42 3.29 3.3V13h2v5h-5z"/>
+              </svg>
+            </button>
             <button className="spotify-control-btn spotify-prev-btn" onClick={() => {
               if (window.roomControls && window.roomControls.skipPrevious) {
                 window.roomControls.skipPrevious();

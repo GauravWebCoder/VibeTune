@@ -2,6 +2,12 @@
 
 const PIPED_BASE = import.meta.env.VITE_PIPED_BASE || 'https://piped.video';
 const YT_API_KEY = import.meta.env.VITE_YOUTUBE_API_KEY || '';
+const isDev = typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.DEV;
+const API_BASE = (!isDev && typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_SOCKET_SERVER_URL)
+  ? String(import.meta.env.VITE_SOCKET_SERVER_URL || '').replace(/\/$/, '')
+  : '';
+
+const withApiBase = (path) => API_BASE ? `${API_BASE}${path}` : path;
 
 function pickBestAudioStream(audioStreams = []) {
   if (!Array.isArray(audioStreams) || audioStreams.length === 0) return null;
@@ -34,7 +40,7 @@ export async function searchYouTube(query, limit = 10) {
   
   // Prefer backend proxy to avoid CORS/rate issues
   try {
-    const url = `/api/youtube/search?q=${encodeURIComponent(query)}&limit=${limit}`;
+    const url = withApiBase(`/api/youtube/search?q=${encodeURIComponent(query)}&limit=${limit}`);
     // console.log('🔗 YouTube search URL:', url);
     
     const res = await fetch(url);
@@ -124,13 +130,26 @@ export async function searchYouTube(query, limit = 10) {
 
 export async function getYouTubeAudioUrl(videoId) {
   // console.log('🎵 getYouTubeAudioUrl called for videoId:', videoId);
-  
-  // Simple approach - return the video ID for client-side handling
-  // console.log('🔄 Using video ID for client-side processing:', videoId);
-  return videoId;
+  if (!videoId) return null;
+  return withApiBase(`/api/youtube/stream/${encodeURIComponent(videoId)}`);
 }
 
 export async function fetchYouTubePlaylist(playlistId, limit = 20) {
+  try {
+    const res = await fetch(withApiBase(`/api/youtube/playlist?list=${encodeURIComponent(playlistId)}&limit=${limit}`));
+    if (res.ok) {
+      const data = await res.json();
+      const items = data?.items || [];
+      return items.map(v => ({
+        ytId: v?.ytId,
+        title: v?.title || 'Unknown',
+        artist: v?.artist || 'YouTube',
+        thumbnail: v?.thumbnail || '',
+      }));
+    }
+  } catch {}
+
+  // Fallback to Piped if server is unavailable
   const res = await fetch(`${PIPED_BASE}/api/v1/playlists/${playlistId}`);
   if (!res.ok) throw new Error('Playlist fetch failed');
   const data = await res.json();
@@ -336,11 +355,21 @@ export async function resolveUrlOrSearch(input, source = 'youtube', options = {}
   // Plain text search
   if (source === 'youtube') {
     const list = await searchYouTube(input, 10);
+    if (!prefetch) {
+      return list.map(v => ({
+        title: v.title,
+        artist: v.artist,
+        thumbnail: v.thumbnail,
+        ytId: v.ytId,
+        provider: 'youtube',
+        url: null
+      }));
+    }
     const out = [];
     for (const v of list) {
       try {
         const url = await getYouTubeAudioUrl(v.ytId);
-        out.push({ title: v.title, artist: v.artist, thumbnail: v.thumbnail, url });
+        out.push({ title: v.title, artist: v.artist, thumbnail: v.thumbnail, ytId: v.ytId, provider: 'youtube', url });
       } catch {}
     }
     return out;
@@ -379,5 +408,3 @@ export async function resolveUrlOrSearch(input, source = 'youtube', options = {}
   }
   return [];
 }
-
-

@@ -20,6 +20,8 @@ export default function Room() {
     play,
     pause,
     audioRef,
+    shuffleMode,
+    toggleShuffle,
     setSkipNextCallback,
     resetPlayback
   } = usePlayback();
@@ -36,6 +38,8 @@ export default function Room() {
   const [isSearching, setIsSearching] = useState(false);
   const [searchError, setSearchError] = useState('');
   const [showSearchSection, setShowSearchSection] = useState(false);
+  const uploadsEnabled = import.meta.env.VITE_ENABLE_UPLOADS === 'true';
+  const [isPlaylistSearch, setIsPlaylistSearch] = useState(false);
   
   // Refs
   const channelRef = useRef(null);
@@ -578,16 +582,20 @@ export default function Room() {
       if (!error && data && Array.isArray(data.queue)) {
         const sanitizeSong = (song) => {
           if (!song || typeof song !== 'object') return null;
-          const { id, title, artist, thumbnail, duration, url, permanentUrl, ytId } = song;
+          const { id, title, artist, thumbnail, duration, url, permanentUrl, ytId, provider, needsResolution } = song;
+          const isYouTube = provider === 'youtube' || Boolean(ytId);
+          const safeUrl = (!isYouTube && typeof url === 'string' && /^https?:\/\//.test(url)) ? url : undefined;
           return {
             id,
             title,
             artist,
             thumbnail: thumbnail || '/music img.png',
             duration,
-            url: (typeof url === 'string' && /^https?:\/\//.test(url)) ? url : undefined,
+            url: safeUrl,
             permanentUrl,
-            ytId
+            ytId,
+            provider,
+            needsResolution: Boolean(needsResolution || (isYouTube && !safeUrl))
           };
         };
 
@@ -608,6 +616,7 @@ export default function Room() {
   };
   
   const loadRoomUsers = async () => {
+    if (!user) return;
     try {
       const { data, error } = await supabase
         .from('room_users')
@@ -804,6 +813,10 @@ export default function Room() {
   };
   
   const handleFileUpload = async (event) => {
+    if (!uploadsEnabled) {
+      showNotification('Uploads are disabled on this server');
+      return;
+    }
     const files = Array.from(event.target.files);
     if (files.length === 0) return;
     
@@ -905,10 +918,14 @@ export default function Room() {
     
     setIsSearching(true);
     setSearchError('');
+    setIsPlaylistSearch(false);
     
     try {
-      const results = await resolveUrlOrSearch(searchQuery);
-      setSearchResults(results);
+      const results = await resolveUrlOrSearch(searchQuery, 'youtube', { prefetch: false });
+      const filtered = (results || []).filter(r => r?.ytId);
+      setSearchResults(filtered);
+      const isPlaylist = /list=/.test(searchQuery) || /youtube\.com\/playlist/.test(searchQuery);
+      setIsPlaylistSearch(isPlaylist && filtered.length > 0);
     } catch (error) {
       // console.error('Search error:', error);
       setSearchError('Search failed. Please try again.');
@@ -916,11 +933,61 @@ export default function Room() {
       setIsSearching(false);
     }
   };
+
+  const buildYouTubeSong = (result) => {
+    const ytId = result?.ytId || result?.id || '';
+    const title = result?.title || 'YouTube Track';
+    const artist = result?.artist || 'YouTube';
+    const thumbnail = result?.thumbnail || '/music img.png';
+    const id = `${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+    return {
+      id,
+      title,
+      artist,
+      thumbnail,
+      ytId,
+      provider: 'youtube',
+      needsResolution: true
+    };
+  };
+
+  const handleAddSearchResult = (result) => {
+    const song = buildYouTubeSong(result);
+    addToQueue(song);
+    showNotification(`Added "${song.title}" to queue`);
+  };
+
+  const handlePlaySearchResult = (result) => {
+    const song = buildYouTubeSong(result);
+    addToQueue(song);
+    playSong(song);
+  };
+
+  const addManyToQueue = (songs) => {
+    if (!songs.length) return;
+    const newQueue = [...(queueRef.current || []), ...songs];
+    queueRef.current = newQueue;
+    updateQueue(newQueue);
+    if (window.roomSync) {
+      window.roomSync.broadcastQueueUpdate(newQueue);
+    }
+  };
+
+  const handleAddAllSearchResults = () => {
+    const songs = searchResults.map(buildYouTubeSong);
+    addManyToQueue(songs);
+    showNotification(`Added ${songs.length} songs to queue`);
+  };
   
   const addToQueue = async (song) => {
-    const newQueue = [...queue, song];
+    const newQueue = [...(queueRef.current || []), song];
+    queueRef.current = newQueue;
     updateQueue(newQueue);
-    
+
+    if (window.roomSync) {
+      window.roomSync.broadcastQueueUpdate(newQueue);
+    }
+
     // Skip Supabase for better performance
     return;
     
@@ -952,9 +1019,16 @@ export default function Room() {
       audioRef.current.onended = () => {
         const currentQueue = queueRef.current;
         const currentIndex = currentQueue.findIndex(s => s.id === song.id);
-        const nextIndex = (currentIndex + 1) % currentQueue.length;
-        
-        if (nextIndex !== currentIndex && currentQueue[nextIndex]) {
+        if (currentQueue.length === 0) return;
+        let nextIndex = (currentIndex + 1) % currentQueue.length;
+        if (shuffleMode && currentQueue.length > 1) {
+          let idx = currentIndex;
+          while (idx === currentIndex) {
+            idx = Math.floor(Math.random() * currentQueue.length);
+          }
+          nextIndex = idx;
+        }
+        if (currentQueue[nextIndex]) {
           playSong(currentQueue[nextIndex]);
         }
       };
@@ -1007,7 +1081,14 @@ export default function Room() {
       return;
     }
     
-    const nextIndex = (currentIndex + 1) % currentQueue.length;
+    let nextIndex = (currentIndex + 1) % currentQueue.length;
+    if (shuffleMode && currentQueue.length > 1) {
+      let idx = currentIndex;
+      while (idx === currentIndex) {
+        idx = Math.floor(Math.random() * currentQueue.length);
+      }
+      nextIndex = idx;
+    }
     const nextSong = currentQueue[nextIndex];
     // console.log('Next index:', nextIndex);
     // console.log('Next song:', nextSong?.title);
@@ -1248,19 +1329,71 @@ export default function Room() {
             <div className="section-header">
               <h2>🎵 Queue ({queue.length})</h2>
               <div className="queue-controls">
-                <label className="btn-upload">
-                  Upload MP3
-                  <input
-                    type="file"
-                    accept="audio/*"
-                    multiple
-                    onChange={handleFileUpload}
-                    style={{ display: 'none' }}
-                  />
-                </label>
+                <button
+                  className="btn-secondary"
+                  onClick={() => setShowSearchSection(prev => !prev)}
+                >
+                  {showSearchSection ? 'Hide YouTube Search' : 'YouTube Search'}
+                </button>
+                {uploadsEnabled && (
+                  <label className="btn-upload">
+                    Upload MP3
+                    <input
+                      type="file"
+                      accept="audio/*"
+                      multiple
+                      onChange={handleFileUpload}
+                      style={{ display: 'none' }}
+                    />
+                  </label>
+                )}
               </div>
             </div>
 
+            {showSearchSection && (
+              <div className="search-section">
+                <div className="search-bar">
+                  <input
+                    type="text"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    placeholder="Search YouTube songs or paste a YouTube link"
+                    onKeyPress={(e) => e.key === 'Enter' && handleSearch()}
+                  />
+                  <button
+                    onClick={handleSearch}
+                    disabled={isSearching || !searchQuery.trim()}
+                  >
+                    {isSearching ? 'Searching...' : 'Search'}
+                  </button>
+                  {isPlaylistSearch && (
+                    <button onClick={handleAddAllSearchResults}>
+                      Add All
+                    </button>
+                  )}
+                </div>
+
+                {searchError && (
+                  <div className="search-error">{searchError}</div>
+                )}
+
+                {searchResults.length > 0 && (
+                  <div className="search-results">
+                    {searchResults.map((song) => (
+                      <div key={`${song.ytId}_${song.title}`} className="search-result">
+                        <img src={song.thumbnail || '/music img.png'} alt={song.title} />
+                        <div className="song-info">
+                          <h4>{song.title}</h4>
+                          <p>{song.artist || 'YouTube'}</p>
+                        </div>
+                        <button onClick={() => handleAddSearchResult(song)}>Add</button>
+                        <button onClick={() => handlePlaySearchResult(song)}>Play</button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
 
         <div className="queue-list">
             {queue.length === 0 ? (

@@ -599,6 +599,14 @@ body::before {
     inset 0 1px 0 rgba(255, 255, 255, 0.3);
 }
 
+.search-result button + button {
+  margin-left: 10px;
+}
+
+.search-bar button + button {
+  margin-left: 10px;
+}
+
 /* Queue List */
 .queue-list {
   display: flex;
@@ -1299,6 +1307,12 @@ body::before {
 .spotify-control-btn:hover {
   color: #ffffff;
   transform: scale(1.15);
+  text-shadow: 0 0 8px rgba(29, 185, 84, 0.5);
+}
+
+.spotify-control-btn.active {
+  color: #1db954;
+  background: rgba(29, 185, 84, 0.15);
   text-shadow: 0 0 8px rgba(29, 185, 84, 0.5);
 }
 

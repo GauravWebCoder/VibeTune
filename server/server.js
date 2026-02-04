@@ -1,7 +1,14 @@
 const express = require('express');
 const http = require('http');
+const https = require('https');
+const path = require('path');
+const { execFile } = require('child_process');
+const { createClient } = require('@supabase/supabase-js');
 const socketIo = require('socket.io');
 const cors = require('cors');
+const dotenv = require('dotenv');
+
+dotenv.config({ path: path.resolve(__dirname, '..', '.env') });
 
 const app = express();
 const server = http.createServer(app);
@@ -25,6 +32,313 @@ const io = socketIo(server, {
 
 // Store room data
 const rooms = new Map();
+const streamCache = new Map();
+
+function isValidYouTubeId(id) {
+  return typeof id === 'string' && /^[a-zA-Z0-9_-]{11}$/.test(id);
+}
+
+function getPipedInstances() {
+  const raw = process.env.PIPED_BASES || process.env.PIPED_BASE || '';
+  const list = raw.split(',').map(v => v.trim()).filter(Boolean);
+  if (list.length > 0) return list;
+  return [
+    'https://piped.video',
+    'https://pipedapi.kavin.rocks',
+    'https://piped.mha.fi',
+    'https://piped.projectsegfau.lt',
+    'https://piped.privacydev.net'
+  ];
+}
+
+function fetchJson(url) {
+  return new Promise((resolve, reject) => {
+    const client = url.startsWith('http://') ? http : https;
+    client.get(url, (res) => {
+      let data = '';
+      res.on('data', chunk => { data += chunk; });
+      res.on('end', () => {
+        if (res.statusCode && res.statusCode >= 400) {
+          const error = new Error(`Request failed: ${res.statusCode}`);
+          error.statusCode = res.statusCode;
+          error.body = data;
+          reject(error);
+          return;
+        }
+        try {
+          resolve(JSON.parse(data));
+        } catch (err) {
+          reject(err);
+        }
+      });
+    }).on('error', reject);
+  });
+}
+
+function proxyStream(url, req, res) {
+  const client = url.startsWith('http://') ? http : https;
+  const headers = {};
+  if (req.headers.range) {
+    headers.Range = req.headers.range;
+  }
+
+  const upstream = client.get(url, { headers }, (upRes) => {
+    res.statusCode = upRes.statusCode || 200;
+    const passthroughHeaders = ['content-type', 'content-length', 'content-range', 'accept-ranges'];
+    passthroughHeaders.forEach((h) => {
+      if (upRes.headers[h]) {
+        res.setHeader(h, upRes.headers[h]);
+      }
+    });
+    upRes.pipe(res);
+  });
+
+  upstream.on('error', (err) => {
+    // console.error('Upstream proxy error:', err);
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Upstream stream failed' });
+    } else {
+      res.end();
+    }
+  });
+}
+
+function runYtDlp(args) {
+  return new Promise((resolve, reject) => {
+    execFile('yt-dlp', args, { timeout: 15000 }, (err, stdout) => {
+      if (err) return reject(err);
+      resolve(String(stdout || '').trim());
+    });
+  });
+}
+
+function runYtDlpViaPython(args) {
+  return new Promise((resolve, reject) => {
+    execFile('python', ['-m', 'yt_dlp', ...args], { timeout: 15000 }, (err, stdout) => {
+      if (err) return reject(err);
+      resolve(String(stdout || '').trim());
+    });
+  });
+}
+
+function runYtDlpViaPyLauncher(args) {
+  return new Promise((resolve, reject) => {
+    execFile('py', ['-3', '-m', 'yt_dlp', ...args], { timeout: 15000 }, (err, stdout) => {
+      if (err) return reject(err);
+      resolve(String(stdout || '').trim());
+    });
+  });
+}
+
+async function getYtDlpAudioUrl(videoId) {
+  const watchUrl = `https://www.youtube.com/watch?v=${videoId}`;
+  const args = [
+    '--no-playlist',
+    '--no-warnings',
+    '-f', 'bestaudio',
+    '-g',
+    watchUrl
+  ];
+
+  let output = '';
+  try {
+    output = await runYtDlp(args);
+  } catch (err) {
+    try {
+      output = await runYtDlpViaPython(args);
+    } catch (pyErr) {
+      output = await runYtDlpViaPyLauncher(args);
+    }
+  }
+
+  if (!output) {
+    throw new Error('yt-dlp returned empty output');
+  }
+  const url = output.split(/\r?\n/)[0].trim();
+  if (!url.startsWith('http')) {
+    throw new Error('yt-dlp returned invalid URL');
+  }
+  return url;
+}
+
+async function getYtDlpPlaylistItems(listId, limit = 50) {
+  const playlistUrl = `https://www.youtube.com/playlist?list=${listId}`;
+  const args = [
+    '--flat-playlist',
+    '-J',
+    playlistUrl
+  ];
+
+  let output = '';
+  try {
+    output = await runYtDlp(args);
+  } catch (err) {
+    try {
+      output = await runYtDlpViaPython(args);
+    } catch (pyErr) {
+      output = await runYtDlpViaPyLauncher(args);
+    }
+  }
+
+  if (!output) {
+    throw new Error('yt-dlp playlist returned empty output');
+  }
+
+  let data = null;
+  try {
+    data = JSON.parse(output);
+  } catch (e) {
+    throw new Error('yt-dlp playlist JSON parse failed');
+  }
+
+  const entries = Array.isArray(data?.entries) ? data.entries : [];
+  const items = entries
+    .filter(e => e?.id)
+    .slice(0, limit)
+    .map(e => ({
+      ytId: e.id,
+      title: e.title || 'Unknown',
+      artist: e.uploader || e.channel || 'YouTube',
+      thumbnail: e.id ? `https://i.ytimg.com/vi/${e.id}/hqdefault.jpg` : ''
+    }));
+
+  return items;
+}
+
+async function listAllStorageFiles(client, bucket, prefix = '') {
+  const files = [];
+  let offset = 0;
+  const limit = 100;
+
+  while (true) {
+    const { data, error } = await client.storage.from(bucket).list(prefix, { limit, offset });
+    if (error) throw error;
+    if (!data || data.length === 0) break;
+
+    for (const item of data) {
+      const itemPath = prefix ? `${prefix}/${item.name}` : item.name;
+      const isFile = Boolean(item.id || item.metadata);
+      if (isFile) {
+        files.push({ path: itemPath, meta: item });
+      } else {
+        const nested = await listAllStorageFiles(client, bucket, itemPath);
+        files.push(...nested);
+      }
+    }
+
+    offset += data.length;
+  }
+
+  return files;
+}
+
+function startSupabaseCleanup() {
+  const supabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const bucket = process.env.SUPABASE_BUCKET || 'songs';
+  const retentionDays = Number(process.env.UPLOAD_RETENTION_DAYS || 3);
+  const intervalHours = Number(process.env.CLEANUP_INTERVAL_HOURS || 6);
+
+  if (!supabaseUrl || !serviceKey || !retentionDays || retentionDays <= 0) {
+    return;
+  }
+
+  const client = createClient(supabaseUrl, serviceKey, {
+    auth: { persistSession: false, autoRefreshToken: false }
+  });
+
+  const runCleanup = async () => {
+    try {
+      const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
+      const files = await listAllStorageFiles(client, bucket);
+      const toDelete = files
+        .filter(f => {
+          const meta = f.meta || {};
+          const dateStr = meta.updated_at || meta.created_at || meta.last_modified || meta.modified_at || meta.inserted_at;
+          const ts = dateStr ? new Date(dateStr).getTime() : 0;
+          return ts > 0 && ts < cutoff;
+        })
+        .map(f => f.path);
+
+      for (let i = 0; i < toDelete.length; i += 100) {
+        const chunk = toDelete.slice(i, i + 100);
+        await client.storage.from(bucket).remove(chunk);
+      }
+    } catch (err) {
+      // console.error('Supabase cleanup failed:', err?.message || err);
+    }
+  };
+
+  runCleanup();
+  setInterval(runCleanup, intervalHours * 60 * 60 * 1000);
+}
+
+async function fetchPipedSearch(query, limit) {
+  const instances = getPipedInstances();
+  let lastError = null;
+  for (const base of instances) {
+    try {
+      const pipedUrl = `${base}/api/v1/search?q=${encodeURIComponent(query)}&region=US`;
+      const data = await fetchJson(pipedUrl);
+      const items = Array.isArray(data) ? data : data?.items || [];
+      const results = items
+        .filter(v => v?.url || v?.id || v?.videoId)
+        .slice(0, limit)
+        .map(v => {
+          const videoId = v?.id || v?.videoId || v?.shortsId || (v?.url ? v.url.replace('/watch?v=', '').split('&')[0] : '');
+          return {
+            ytId: videoId,
+            title: v?.title || 'Unknown',
+            artist: v?.uploader || v?.author || 'YouTube',
+            thumbnail: v?.thumbnail || v?.thumbnailUrl || v?.thumbnailSrc || ''
+          };
+        })
+        .filter(it => it.ytId);
+      return results;
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  if (lastError) throw lastError;
+  return [];
+}
+
+async function fetchPipedStreamUrl(videoId) {
+  const instances = getPipedInstances();
+  let lastError = null;
+  for (const base of instances) {
+    try {
+      const data = await fetchJson(`${base}/api/v1/streams/${videoId}`);
+      const streams = Array.isArray(data?.audioStreams) ? data.audioStreams : [];
+      const best = streams
+        .filter(s => s?.url)
+        .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+      if (best?.url) {
+        return { url: best.url, mimeType: best?.mimeType || 'audio/mpeg' };
+      }
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  if (lastError) throw lastError;
+  throw new Error('No Piped stream available');
+}
+
+function getCachedStream(videoId) {
+  const cached = streamCache.get(videoId);
+  if (!cached) return null;
+  if (cached.expiresAt && cached.expiresAt > Date.now() + 30_000) {
+    return cached.audioUrl;
+  }
+  streamCache.delete(videoId);
+  return null;
+}
+
+function cacheStream(videoId, audioUrl) {
+  const match = /[?&]expire=(\d+)/.exec(audioUrl || '');
+  const expiresAt = match ? Number(match[1]) * 1000 : Date.now() + 5 * 60 * 1000;
+  streamCache.set(videoId, { audioUrl, expiresAt });
+}
 
 // Helper function to get or create room
 function getRoom(roomId) {
@@ -237,6 +551,98 @@ app.get('/', (req, res) => {
   });
 });
 
+// YouTube search (via API key or Piped fallback)
+app.get('/api/youtube/search', async (req, res) => {
+  const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+  const limitRaw = typeof req.query.limit === 'string' ? parseInt(req.query.limit, 10) : 10;
+  const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 25) : 10;
+
+  if (!q) {
+    return res.status(400).json({ error: 'Missing query' });
+  }
+
+  const apiKey = process.env.YOUTUBE_API_KEY || process.env.VITE_YOUTUBE_API_KEY || '';
+  try {
+    if (apiKey) {
+      const apiUrl = `https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&maxResults=${limit}&q=${encodeURIComponent(q)}&key=${apiKey}`;
+      const data = await fetchJson(apiUrl);
+      const items = (data?.items || []).map(it => ({
+        ytId: it?.id?.videoId,
+        title: it?.snippet?.title || 'Unknown',
+        artist: it?.snippet?.channelTitle || 'YouTube',
+        thumbnail: it?.snippet?.thumbnails?.medium?.url || it?.snippet?.thumbnails?.default?.url || ''
+      })).filter(it => it.ytId);
+      return res.json({ items });
+    }
+
+    const results = await fetchPipedSearch(q, limit);
+    return res.json({ items: results });
+  } catch (error) {
+    return res.status(500).json({ error: 'YouTube search failed' });
+  }
+});
+
+// YouTube playlist (yt-dlp)
+app.get('/api/youtube/playlist', async (req, res) => {
+  const listId = typeof req.query.list === 'string' ? req.query.list.trim() : '';
+  const limitRaw = typeof req.query.limit === 'string' ? parseInt(req.query.limit, 10) : 50;
+  const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 100) : 50;
+
+  if (!listId) {
+    return res.status(400).json({ error: 'Missing list id' });
+  }
+
+  try {
+    const items = await getYtDlpPlaylistItems(listId, limit);
+    return res.json({ items });
+  } catch (error) {
+    return res.status(500).json({ error: 'Playlist fetch failed' });
+  }
+});
+
+// YouTube audio stream URL resolver (proxy path)
+app.get('/api/youtube/streams/:id', async (req, res) => {
+  const videoId = req.params.id;
+  if (!videoId || !isValidYouTubeId(videoId)) {
+    return res.status(400).json({ error: 'Invalid video ID' });
+  }
+
+  try {
+    return res.json({ audioUrl: `/api/youtube/stream/${videoId}` });
+  } catch (error) {
+    return res.status(500).json({ error: 'Failed to fetch YouTube stream' });
+  }
+});
+
+// YouTube audio stream proxy (CORS-safe)
+app.get('/api/youtube/stream/:id', async (req, res) => {
+  const videoId = req.params.id;
+  if (!videoId || !isValidYouTubeId(videoId)) {
+    return res.status(400).json({ error: 'Invalid video ID' });
+  }
+
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Headers', 'Range');
+  res.setHeader('Access-Control-Expose-Headers', 'Content-Range, Accept-Ranges, Content-Length');
+
+  try {
+    const url = await getYtDlpAudioUrl(videoId);
+    res.setHeader('Accept-Ranges', 'bytes');
+    return proxyStream(url, req, res);
+  } catch (error) {
+    console.error('yt-dlp failed, trying Piped fallback:', error?.message || error);
+    try {
+      const stream = await fetchPipedStreamUrl(videoId);
+      res.setHeader('Content-Type', (stream?.mimeType || 'audio/mpeg').split(';')[0]);
+      res.setHeader('Accept-Ranges', 'bytes');
+      return proxyStream(stream.url, req, res);
+    } catch (fallbackError) {
+      console.error('Piped fallback failed:', fallbackError?.message || fallbackError);
+      return res.status(500).json({ error: 'Failed to stream YouTube audio' });
+    }
+  }
+});
+
 // Health check endpoint
 app.get('/health', (req, res) => {
   res.json({ 
@@ -347,3 +753,5 @@ server.listen(PORT, () => {
   // console.log('🚀 Socket.IO server running on port:', PORT);
   // console.log('🌐 Health check: https://vibetune-production.up.railway.app/health');
 });
+
+startSupabaseCleanup();

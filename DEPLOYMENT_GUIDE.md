@@ -89,9 +89,7 @@
 
 2. **Add your Supabase credentials** (you mentioned you'll handle this):
    ```
-   SUPABASE_URL=https://bnkiywquozlymthlyvez.supabase.co
-   SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJua2l5d3F1b3pseW10aGx5dmV6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA1MTY3NDgsImV4cCI6MjA3NjA5Mjc0OH0.P89Kht2kue5XCi_Zhjf8-rvbnBnGCxuLHmCup1NfhLg
-   SUPABASE_SERVICE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJua2l5d3F1b3pseW10aGx5dmV6Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2MDUxNjc0OCwiZXhwIjoyMDc2MDkyNzQ4fQ.XwRsU7Z60KHPN5-vAKyirBAXn4P9QDlLVueq0zxpGuY
+
    ```
 
 3. **Click "Deploy"** to restart with new variables
@@ -137,9 +135,7 @@
    - Click "Environment Variables" section
    - Add these variables:
    ```
-   VITE_SUPABASE_URL=https://bnkiywquozlymthlyvez.supabase.co
-   VITE_SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJua2l5d3F1b3pseW10aGx5dmV6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA1MTY3NDgsImV4cCI6MjA3NjA5Mjc0OH0.P89Kht2kue5XCi_Zhjf8-rvbnBnGCxuLHmCup1NfhLg
-   VITE_API_URL=https://vibetune-production.up.railway.app/
+ 
 
 4. **Click "Deploy"**
 5. **Wait for deployment** (2-3 minutes)

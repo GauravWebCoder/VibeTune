@@ -191,8 +191,10 @@ export const PlaybackProvider = ({ children }) => {
       return;
     }
 
-    // Handle items that need URL resolution
-    if (song.needsResolution && song.ytId) {
+    // Handle items that need URL resolution (YouTube)
+    const hasVideoIdUrl = typeof song.url === 'string' && song.url.length === 11 && /^[a-zA-Z0-9_-]+$/.test(song.url);
+    const shouldResolve = Boolean(song?.ytId) && (song.needsResolution || !song.url || hasVideoIdUrl);
+    if (shouldResolve) {
       // console.log('🔄 Resolving URL for song:', song.title);
       try {
         const { getYouTubeAudioUrl } = await import('../utils/media-resolver');
@@ -208,8 +210,7 @@ export const PlaybackProvider = ({ children }) => {
         }
       } catch (error) {
         // console.error('❌ Failed to resolve URL:', error);
-        setIsLoading(false);
-        return;
+        // Fall through to ID-based resolution below
       }
     }
 
@@ -247,26 +248,25 @@ export const PlaybackProvider = ({ children }) => {
       } else {
         // Handle YouTube URLs and video IDs
         let audioUrl = song.url || song.src || '';
+        if (!audioUrl && song.ytId) {
+          audioUrl = song.ytId;
+        }
         
         // Check if it's a YouTube video ID (11 characters, alphanumeric)
         if (audioUrl && audioUrl.length === 11 && /^[a-zA-Z0-9_-]+$/.test(audioUrl)) {
           // console.log('🎵 YouTube video ID detected:', audioUrl);
-          // Try to get YouTube audio stream
           try {
-            const response = await fetch(`/api/youtube/streams/${audioUrl}`);
-            if (response.ok) {
-              const data = await response.json();
-              if (data.audioUrl) {
-                audioRef.current.src = data.audioUrl;
-                audioRef.current.load();
-                // console.log('🎵 YouTube audio stream loaded');
-                return;
-              }
+            const { getYouTubeAudioUrl } = await import('../utils/media-resolver');
+            const proxiedUrl = await getYouTubeAudioUrl(audioUrl);
+            if (proxiedUrl && audioRef.current) {
+              audioRef.current.src = proxiedUrl;
+              audioRef.current.load();
+              return;
             }
           } catch (error) {
             // console.warn('⚠️ Failed to get YouTube stream:', error);
           }
-          
+
           // Fallback to placeholder if stream fails
           if (audioRef.current) {
             audioRef.current.src = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';

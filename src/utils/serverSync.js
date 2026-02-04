@@ -32,8 +32,12 @@ class ServerSync {
       duration,
       url,
       permanentUrl,
-      ytId
+      ytId,
+      provider,
+      needsResolution
     } = song;
+    const isYouTube = provider === 'youtube' || Boolean(ytId);
+    const safeUrl = (!isYouTube && typeof url === 'string' && /^https?:\/\//.test(url)) ? url : undefined;
     return {
       id,
       title,
@@ -41,8 +45,10 @@ class ServerSync {
       thumbnail: thumbnail || '/music img.png',
       duration,
       permanentUrl,
-      url: (typeof url === 'string' && /^https?:\/\//.test(url)) ? url : undefined,
-      ytId
+      url: safeUrl,
+      ytId,
+      provider,
+      needsResolution: Boolean(needsResolution || (isYouTube && !safeUrl))
     };
   }
 
