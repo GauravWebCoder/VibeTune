@@ -112,6 +112,15 @@ function runYtDlp(args) {
   });
 }
 
+function runYtDlpViaPython3(args) {
+  return new Promise((resolve, reject) => {
+    execFile('python3', ['-m', 'yt_dlp', ...args], { timeout: 15000 }, (err, stdout) => {
+      if (err) return reject(err);
+      resolve(String(stdout || '').trim());
+    });
+  });
+}
+
 function runYtDlpViaPython(args) {
   return new Promise((resolve, reject) => {
     execFile('python', ['-m', 'yt_dlp', ...args], { timeout: 15000 }, (err, stdout) => {
@@ -141,14 +150,25 @@ async function getYtDlpAudioUrl(videoId) {
   ];
 
   let output = '';
-  try {
-    output = await runYtDlp(args);
-  } catch (err) {
+  const attempts = [
+    { label: 'yt-dlp', fn: () => runYtDlp(args) },
+    { label: 'python3 -m yt_dlp', fn: () => runYtDlpViaPython3(args) },
+    { label: 'python -m yt_dlp', fn: () => runYtDlpViaPython(args) },
+    { label: 'py -3 -m yt_dlp', fn: () => runYtDlpViaPyLauncher(args) }
+  ];
+
+  let lastError = null;
+  for (const attempt of attempts) {
     try {
-      output = await runYtDlpViaPython(args);
-    } catch (pyErr) {
-      output = await runYtDlpViaPyLauncher(args);
+      output = await attempt.fn();
+      if (output) break;
+    } catch (err) {
+      lastError = err;
     }
+  }
+
+  if (!output && lastError) {
+    throw lastError;
   }
 
   if (!output) {
