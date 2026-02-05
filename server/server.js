@@ -139,7 +139,31 @@ function runYtDlpViaPyLauncher(args) {
   });
 }
 
+const YT_URL_CACHE_TTL_MS = Number(process.env.YT_URL_CACHE_TTL_MS || 10 * 60 * 1000);
+const ytUrlCache = new Map();
+
+function getCachedYtUrl(videoId) {
+  const entry = ytUrlCache.get(videoId);
+  if (!entry) return null;
+  if (entry.expiresAt <= Date.now()) {
+    ytUrlCache.delete(videoId);
+    return null;
+  }
+  return entry.url;
+}
+
+function setCachedYtUrl(videoId, url) {
+  if (!videoId || !url) return;
+  ytUrlCache.set(videoId, {
+    url,
+    expiresAt: Date.now() + YT_URL_CACHE_TTL_MS
+  });
+}
+
 async function getYtDlpAudioUrl(videoId) {
+  const cached = getCachedYtUrl(videoId);
+  if (cached) return cached;
+
   const watchUrl = `https://www.youtube.com/watch?v=${videoId}`;
   const args = [
     '--no-playlist',
@@ -178,6 +202,7 @@ async function getYtDlpAudioUrl(videoId) {
   if (!url.startsWith('http')) {
     throw new Error('yt-dlp returned invalid URL');
   }
+  setCachedYtUrl(videoId, url);
   return url;
 }
 
@@ -289,8 +314,24 @@ function startSupabaseCleanup() {
     }
   };
 
+  const runChatCleanup = async () => {
+    try {
+      const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
+      await client
+        .from('chat_messages')
+        .delete()
+        .lt('created_at', cutoff);
+    } catch (err) {
+      // console.error('Supabase chat cleanup failed:', err?.message || err);
+    }
+  };
+
   runCleanup();
-  setInterval(runCleanup, intervalHours * 60 * 60 * 1000);
+  runChatCleanup();
+  setInterval(() => {
+    runCleanup();
+    runChatCleanup();
+  }, intervalHours * 60 * 60 * 1000);
 }
 
 async function fetchPipedSearch(query, limit) {
@@ -368,6 +409,7 @@ function getRoom(roomId) {
       queue: [],
       currentSong: null,
       isPlaying: false,
+      shuffleMode: false,
       currentTime: 0, // base position (seconds)
       startedAt: null // server ms when play started (null if paused)
     });
@@ -416,6 +458,7 @@ io.on('connection', (socket) => {
     const roomState = {
       queue: room.queue,
       isPlaying: room.isPlaying,
+      shuffleMode: room.shuffleMode,
       currentTime: getComputedCurrentTime(room),
       users: Array.from(room.users.values())
     };
@@ -477,6 +520,11 @@ io.on('connection', (socket) => {
           room.queue = payload.queue;
         }
         break;
+      case 'shuffle':
+        if (typeof payload.shuffleMode === 'boolean') {
+          room.shuffleMode = payload.shuffleMode;
+        }
+        break;
       case 'song_change':
         if (payload.currentSong) {
           room.currentSong = payload.currentSong;
@@ -488,10 +536,12 @@ io.on('connection', (socket) => {
         break;
     }
 
+    const computedTime = getComputedCurrentTime(room);
+
     // Broadcast to other users in room
     broadcastToRoom(roomId, 'sync_event', {
       type,
-      payload: { ...payload, currentTime: payload?.currentTime ?? payload?.currentPosition },
+      payload: { ...payload, currentTime: payload?.currentTime ?? payload?.currentPosition ?? computedTime },
       fromUserId: room.users.get(socket.id)?.id
     }, socket.id);
 
@@ -500,6 +550,7 @@ io.on('connection', (socket) => {
       queue: room.queue,
       currentSong: room.currentSong,
       isPlaying: room.isPlaying,
+      shuffleMode: room.shuffleMode,
       currentTime: getComputedCurrentTime(room),
       users: Array.from(room.users.values())
     });
@@ -605,8 +656,8 @@ app.get('/api/youtube/search', async (req, res) => {
 // YouTube playlist (yt-dlp)
 app.get('/api/youtube/playlist', async (req, res) => {
   const listId = typeof req.query.list === 'string' ? req.query.list.trim() : '';
-  const limitRaw = typeof req.query.limit === 'string' ? parseInt(req.query.limit, 10) : 50;
-  const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 100) : 50;
+  const limitRaw = typeof req.query.limit === 'string' ? parseInt(req.query.limit, 10) : 300;
+  const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 500) : 300;
 
   if (!listId) {
     return res.status(400).json({ error: 'Missing list id' });
@@ -634,6 +685,21 @@ app.get('/api/youtube/streams/:id', async (req, res) => {
   }
 });
 
+// YouTube audio URL resolver (warm cache, no stream)
+app.get('/api/youtube/resolve/:id', async (req, res) => {
+  const videoId = req.params.id;
+  if (!videoId || !isValidYouTubeId(videoId)) {
+    return res.status(400).json({ error: 'Invalid video ID' });
+  }
+
+  try {
+    const url = await getYtDlpAudioUrl(videoId);
+    return res.json({ url });
+  } catch (error) {
+    return res.status(500).json({ error: 'Failed to resolve YouTube audio' });
+  }
+});
+
 // YouTube audio stream proxy (CORS-safe)
 app.get('/api/youtube/stream/:id', async (req, res) => {
   const videoId = req.params.id;
@@ -646,6 +712,10 @@ app.get('/api/youtube/stream/:id', async (req, res) => {
   res.setHeader('Access-Control-Expose-Headers', 'Content-Range, Accept-Ranges, Content-Length');
 
   try {
+    if (String(req.query.warm || '') === '1') {
+      await getYtDlpAudioUrl(videoId);
+      return res.status(204).end();
+    }
     const url = await getYtDlpAudioUrl(videoId);
     res.setHeader('Accept-Ranges', 'bytes');
     return proxyStream(url, req, res);
@@ -655,6 +725,9 @@ app.get('/api/youtube/stream/:id', async (req, res) => {
       const stream = await fetchPipedStreamUrl(videoId);
       res.setHeader('Content-Type', (stream?.mimeType || 'audio/mpeg').split(';')[0]);
       res.setHeader('Accept-Ranges', 'bytes');
+      if (stream?.url) {
+        setCachedYtUrl(videoId, stream.url);
+      }
       return proxyStream(stream.url, req, res);
     } catch (fallbackError) {
       console.error('Piped fallback failed:', fallbackError?.message || fallbackError);
@@ -681,7 +754,8 @@ app.get('/room/:roomId', (req, res) => {
     roomId,
     users: Array.from(room.users.values()),
     queue: room.queue,
-    isPlaying: room.isPlaying
+    isPlaying: room.isPlaying,
+    shuffleMode: room.shuffleMode
   };
   
   // Only include currentSong if it's valid and has required fields

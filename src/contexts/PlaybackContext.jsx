@@ -15,9 +15,12 @@ export const PlaybackProvider = ({ children }) => {
   
   // Refs
   const audioRef = useRef(null);
+  const preloadAudioRef = useRef(null);
   const skipNextCallbackRef = useRef(null);
   const syncCallbackRef = useRef(null);
   const loadedTracksRef = useRef(new Map()); // Track loaded audio elements
+  const pendingPlayRef = useRef(false);
+  const pendingSeekRef = useRef(null);
   
   // Spotify context
   const { 
@@ -36,7 +39,7 @@ export const PlaybackProvider = ({ children }) => {
     if (!audioRef.current) {
       audioRef.current = new Audio();
       audioRef.current.crossOrigin = 'anonymous';
-      audioRef.current.preload = 'metadata'; // Load metadata only
+      audioRef.current.preload = 'auto';
       audioRef.current.volume = 1.0;
       
       // Detect low-end device
@@ -63,12 +66,18 @@ export const PlaybackProvider = ({ children }) => {
         audioRef.current.crossOrigin = 'anonymous';
       }
     }
+    if (!preloadAudioRef.current) {
+      preloadAudioRef.current = new Audio();
+      preloadAudioRef.current.crossOrigin = 'anonymous';
+      preloadAudioRef.current.preload = 'auto';
+    }
     const audio = audioRef.current;
     if (!audio) return;
 
     const handlePlay = () => {
       // Audio element: play event fired
       setIsPlaying(true);
+      pendingPlayRef.current = false;
     };
     const handlePause = () => {
       // Audio element: pause event fired
@@ -110,6 +119,7 @@ export const PlaybackProvider = ({ children }) => {
     // Set playing state immediately
     setIsPlaying(true);
     queueManager.setIsPlaying(true);
+    pendingPlayRef.current = true;
     
     // Force play with retry mechanism
     const attemptPlay = () => {
@@ -160,6 +170,32 @@ export const PlaybackProvider = ({ children }) => {
     return song;
   }, []);
 
+  const preloadSong = useCallback(async (song) => {
+    if (!song) return;
+    try {
+      if (song.ytId) {
+        const { warmYouTubeAudio, getYouTubeAudioUrl } = await import('../utils/media-resolver');
+        await warmYouTubeAudio(song.ytId);
+        // If warmup is unavailable, fallback to prebuffering via proxy stream
+        if (preloadAudioRef.current) {
+          const streamUrl = await getYouTubeAudioUrl(song.ytId);
+          if (streamUrl && preloadAudioRef.current.src !== streamUrl) {
+            preloadAudioRef.current.src = streamUrl;
+            preloadAudioRef.current.load();
+          }
+        }
+        return;
+      }
+
+      if (!preloadAudioRef.current) return;
+      let url = song.url;
+      if (url && preloadAudioRef.current.src !== url) {
+        preloadAudioRef.current.src = url;
+        preloadAudioRef.current.load();
+      }
+    } catch {}
+  }, []);
+
   // Simplified cleanup - no complex track management
   const cleanupOldTracks = useCallback(() => {
     // No complex cleanup needed
@@ -173,7 +209,7 @@ export const PlaybackProvider = ({ children }) => {
       if (audioRef.current) {
         audioRef.current.src = '';
       }
-      return;
+      return null;
     }
 
     // Clean up old tracks before loading new one
@@ -188,7 +224,7 @@ export const PlaybackProvider = ({ children }) => {
     if (loadedTrack && loadedTrack.error) {
       // console.error('Track failed to load:', song.title);
       setIsLoading(false);
-      return;
+      return null;
     }
 
     // Handle items that need URL resolution (YouTube)
@@ -217,6 +253,9 @@ export const PlaybackProvider = ({ children }) => {
     // YouTube only mode - no Spotify playback
 
     if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.currentTime = 0;
+      pendingSeekRef.current = null;
       // Handle uploaded files properly
       if (song.file instanceof File) {
         try { 
@@ -292,12 +331,22 @@ export const PlaybackProvider = ({ children }) => {
         
         audioRef.current.src = audioUrl;
       }
-      audioRef.current.load();
-      
       audioRef.current.oncanplay = () => {
         setIsLoading(false);
+        if (pendingPlayRef.current) {
+          audioRef.current.play().catch(() => {});
+        }
         // console.log('🎵 Audio can play:', song.title);
       };
+
+      audioRef.current.onloadedmetadata = () => {
+        if (audioRef.current && pendingSeekRef.current !== null) {
+          audioRef.current.currentTime = pendingSeekRef.current;
+          pendingSeekRef.current = null;
+        }
+      };
+
+      audioRef.current.load();
 
     audioRef.current.onerror = (e) => {
       // console.error('Error loading audio:', song, e);
@@ -387,12 +436,23 @@ export const PlaybackProvider = ({ children }) => {
         // console.log('🎵 Audio data loaded for:', song.title);
       };
     }
+    return song || null;
   }, [loadTrackOnDemand, cleanupOldTracks]);
 
   // Update queue
   const updateQueue = useCallback((newQueue) => {
     setQueue(newQueue);
     queueManager.updateQueue(newQueue);
+  }, []);
+
+  const setPendingSeek = useCallback((time) => {
+    if (typeof time !== 'number' || Number.isNaN(time)) return;
+    pendingSeekRef.current = Math.max(0, time);
+    if (audioRef.current) {
+      try {
+        audioRef.current.currentTime = pendingSeekRef.current;
+      } catch {}
+    }
   }, []);
 
   // Add to queue
@@ -428,6 +488,10 @@ export const PlaybackProvider = ({ children }) => {
   }, []);
 
   // Toggle shuffle
+  const setShuffleModeState = useCallback((value) => {
+    setShuffleMode(!!value);
+  }, []);
+
   const toggleShuffle = useCallback(() => {
     setShuffleMode(prev => !prev);
   }, []);
@@ -533,12 +597,15 @@ export const PlaybackProvider = ({ children }) => {
     skipPrevious,
     setSyncCallback,
     toggleShuffle,
+    setShuffleModeState,
+    preloadSong,
     toggleRepeat,
     togglePlayPause,
     setVolume,
     getCurrentTime,
     setCurrentTime,
     seek,
+    setPendingSeek,
     getDuration,
     getVolume,
     resetPlayback

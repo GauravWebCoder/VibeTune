@@ -125,7 +125,7 @@ function Sidebar({ sidebarOpen, setSidebarOpen }) {
 }
 
 function FooterPlayer() {
-  const { currentSong, isPlaying, togglePlayPause, skipNext, skipPrevious, audioRef, shuffleMode, toggleShuffle } = usePlayback();
+  const { currentSong, isPlaying, togglePlayPause, skipNext, skipPrevious, audioRef, shuffleMode, toggleShuffle, queue } = usePlayback();
   const [currentTime, setCurrentTime] = useState(0); // displayed time (UI)
   const [duration, setDuration] = useState(0);
   const [volume, setVolume] = useState(0.7);
@@ -282,11 +282,13 @@ function FooterPlayer() {
               <div className="spotify-song-details">
                 <h4 className="spotify-song-title">{currentSong.title}</h4>
                 <p className="spotify-song-artist">{currentSong.artist}</p>
+                <div className="queue-count-badge">Queue: {queue.length}</div>
               </div>
             </>
           ) : (
             <div className="spotify-placeholder">
               <div>No song selected</div>
+              <div className="queue-count-badge">Queue: {queue.length}</div>
             </div>
           )}
         </div>
@@ -296,7 +298,16 @@ function FooterPlayer() {
           <div className="spotify-controls">
             <button
               className={`spotify-control-btn ${shuffleMode ? 'active' : ''}`}
-              onClick={toggleShuffle}
+              onClick={() => {
+                const next = !shuffleMode;
+                toggleShuffle();
+                if (next && window.roomSync?.shuffleQueue) {
+                  window.roomSync.shuffleQueue();
+                }
+                if (window.roomSync?.broadcastShuffle) {
+                  window.roomSync.broadcastShuffle(next);
+                }
+              }}
               title="Shuffle"
               aria-pressed={shuffleMode}
             >
@@ -321,7 +332,8 @@ function FooterPlayer() {
               onClick={() => {
                 const newPlayingState = !isPlaying;
                 if (window.roomSync) {
-                  window.roomSync.broadcastPlayPause(newPlayingState);
+                  const currentTime = audioRef.current ? audioRef.current.currentTime : 0;
+                  window.roomSync.broadcastPlayPause(newPlayingState, currentTime);
                 }
                 togglePlayPause();
               }}

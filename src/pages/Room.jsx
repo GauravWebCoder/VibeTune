@@ -22,6 +22,9 @@ export default function Room() {
     audioRef,
     shuffleMode,
     toggleShuffle,
+    setShuffleModeState,
+    preloadSong,
+    setPendingSeek,
     setSkipNextCallback,
     resetPlayback
   } = usePlayback();
@@ -40,6 +43,8 @@ export default function Room() {
   const [showSearchSection, setShowSearchSection] = useState(false);
   const uploadsEnabled = import.meta.env.VITE_ENABLE_UPLOADS === 'true';
   const [isPlaylistSearch, setIsPlaylistSearch] = useState(false);
+  const [searchVisibleCount, setSearchVisibleCount] = useState(20);
+  const [queueVisibleCount, setQueueVisibleCount] = useState(50);
   
   // Refs
   const channelRef = useRef(null);
@@ -64,6 +69,20 @@ export default function Room() {
   const isLeaderRef = useRef(false);
   const latestRoomDataRef = useRef(null);
   const lastRemoteAdjustRef = useRef(0);
+  const lastShuffleAtRef = useRef(0);
+  const lastPrewarmIdsRef = useRef([]);
+  const lastSongChangeAtRef = useRef(0);
+  const lastUsersRef = useRef([]);
+
+  const getNextSongFromQueue = useCallback((song, queueList) => {
+    const currentQueue = Array.isArray(queueList) ? queueList : queueRef.current;
+    if (!song || !currentQueue || currentQueue.length === 0) return null;
+    const currentIndex = currentQueue.findIndex(item => item.id === song.id);
+    if (currentIndex === -1) return currentQueue[0] || null;
+    const nextIndex = (currentIndex + 1) % currentQueue.length;
+    return currentQueue[nextIndex] || null;
+  }, []);
+
   
   // Update refs when values change
   useEffect(() => {
@@ -74,6 +93,117 @@ export default function Room() {
     updateQueueRef.current = updateQueue;
     queueRef.current = queue;
   }, [currentSong, isPlaying, play, pause, updateQueue, queue]);
+
+  const normalizeSocketUsers = useCallback((users) => {
+    const map = new Map();
+    (users || []).forEach((u) => {
+      const id = u?.user_id || u?.id;
+      if (!id) return;
+      map.set(id, {
+        user_id: id,
+        username: u?.username || 'User',
+        avatar: u?.avatar || '/music img.png'
+      });
+    });
+    return Array.from(map.values());
+  }, []);
+
+  useEffect(() => {
+    if (!currentSong) return;
+    const nextSong = getNextSongFromQueue(currentSong, queueRef.current);
+    if (nextSong) {
+      preloadSong(nextSong);
+    }
+  }, [currentSong, queue, preloadSong, getNextSongFromQueue]);
+
+  useEffect(() => {
+    if (!currentSong || !queueRef.current?.length) return;
+    const currentQueue = queueRef.current;
+    const currentIndex = currentQueue.findIndex(song => song.id === currentSong.id);
+    if (currentIndex === -1) return;
+
+    const nextCandidates = [];
+    for (let i = 1; i <= 2; i++) {
+      const candidate = currentQueue[(currentIndex + i) % currentQueue.length];
+      if (candidate) nextCandidates.push(candidate);
+    }
+
+    const nextIds = nextCandidates.map(song => song.id).filter(Boolean);
+    const lastIds = lastPrewarmIdsRef.current || [];
+    const isSame = nextIds.length === lastIds.length && nextIds.every((id, idx) => id === lastIds[idx]);
+    if (isSame) return;
+
+    lastPrewarmIdsRef.current = nextIds;
+    setTimeout(() => {
+      nextCandidates.forEach(song => preloadSong(song));
+    }, 200);
+  }, [currentSong, queue, preloadSong]);
+
+  const shuffleQueue = useCallback(() => {
+    const currentQueue = queueRef.current || [];
+    if (!Array.isArray(currentQueue) || currentQueue.length <= 1) return;
+
+    const activeSong = currentSongRef.current;
+    const rest = activeSong?.id
+      ? currentQueue.filter(song => song.id !== activeSong.id)
+      : [...currentQueue];
+
+    for (let i = rest.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [rest[i], rest[j]] = [rest[j], rest[i]];
+    }
+
+    const newQueue = activeSong?.id ? [activeSong, ...rest] : rest;
+    queueRef.current = newQueue;
+    if (updateQueueRef.current) {
+      updateQueueRef.current(newQueue);
+    }
+
+    if (isSupabaseReal) {
+      supabase
+        .from('rooms')
+        .update({
+          queue: newQueue,
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', roomId)
+        .then(() => {})
+        .catch(() => {});
+    }
+
+    if (window.roomSync) {
+      window.roomSync.broadcastQueueUpdate(newQueue);
+    }
+    lastShuffleAtRef.current = Date.now();
+  }, [roomId]);
+
+  const removeSongFromQueue = useCallback((songId) => {
+    if (!songId) return;
+    const currentQueue = queueRef.current || [];
+    const newQueue = currentQueue.filter(song => song.id !== songId);
+    if (newQueue.length === currentQueue.length) return;
+
+    queueRef.current = newQueue;
+    if (updateQueueRef.current) {
+      updateQueueRef.current(newQueue);
+    }
+
+    if (isSupabaseReal) {
+      supabase
+        .from('rooms')
+        .update({
+          queue: newQueue,
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', roomId)
+        .then(() => {})
+        .catch(() => {});
+    }
+
+    if (window.roomSync) {
+      window.roomSync.broadcastQueueUpdate(newQueue);
+    }
+  }, [roomId]);
   
   // Initialize room
   useEffect(() => {
@@ -142,43 +272,119 @@ export default function Room() {
       // Process updates silently
       latestRoomDataRef.current = data;
       
-      // Handle play/pause updates
-      if (typeof data.isPlaying === 'boolean' && data.isPlaying !== isPlayingRef.current) {
-        const now = Date.now();
-        if (now - lastPlayPauseSyncRef.current < 100) { // 0.1 second debounce
-        return;
-      }
-        lastPlayPauseSyncRef.current = now;
-        
-        isPlayingRef.current = data.isPlaying;
-        
-        if (data.isPlaying) {
-          playRef.current();
-        } else {
-          pauseRef.current();
+        // Handle play/pause updates
+        if (typeof data.isPlaying === 'boolean') {
+          const now = Date.now();
+          if (data.fromUserId && data.fromUserId === user?.id) {
+            return;
+          }
+          if (data.isPlaying && data.isPlaying === isPlayingRef.current) {
+            return;
+          }
+          if (!data.isPlaying && (now - lastSongChangeAtRef.current < 800)) {
+            return;
+          }
+          lastPlayPauseSyncRef.current = now;
+          isPlayingRef.current = data.isPlaying;
+          
+          if (data.isPlaying) {
+            playRef.current();
+          } else {
+            if (data?.currentTime !== undefined) {
+              setPendingSeek(Number(data.currentTime) || 0);
+            }
+            pauseRef.current();
+          }
         }
-      }
+
+        // Handle live user list from socket room_state
+        if (Array.isArray(data.users)) {
+          const normalized = normalizeSocketUsers(data.users);
+          const prev = lastUsersRef.current || [];
+          const prevIds = new Set(prev.map(u => u.user_id));
+          const nextIds = new Set(normalized.map(u => u.user_id));
+
+          // Joined users
+          normalized.forEach(u => {
+            if (!prevIds.has(u.user_id) && u.user_id !== user?.id) {
+              showNotification(`${u.username} joined the room`);
+              setMessages(prevMsgs => [...prevMsgs, {
+                id: `system_join_${Date.now()}_${u.user_id}`,
+                user_id: 'system',
+                username: 'System',
+                avatar: '/music img.png',
+                message: `🎉 ${u.username} joined the room!`,
+                created_at: new Date().toISOString(),
+                is_system: true
+              }]);
+            }
+          });
+
+          // Left users
+          prev.forEach(u => {
+            if (!nextIds.has(u.user_id) && u.user_id !== user?.id) {
+              showNotification(`${u.username} left the room`);
+              setMessages(prevMsgs => [...prevMsgs, {
+                id: `system_leave_${Date.now()}_${u.user_id}`,
+                user_id: 'system',
+                username: 'System',
+                avatar: '/music img.png',
+                message: `👋 ${u.username} left the room`,
+                created_at: new Date().toISOString(),
+                is_system: true
+              }]);
+            }
+          });
+
+          lastUsersRef.current = normalized;
+          setRoomUsers(normalized);
+        }
       
-      // Handle song changes - ONLY if we have a valid song
-      if (data.currentSong && data.currentSong.id && data.currentSong.id !== currentSongRef.current?.id) {
-        setCurrentSong(data.currentSong);
-        currentSongRef.current = data.currentSong;
-        
-        if (audioRef.current) {
-          audioRef.current.pause();
-          audioRef.current.currentTime = 0;
+        // Handle song changes - ONLY if we have a valid song
+        if (data.currentSong && data.currentSong.id && data.currentSong.id !== currentSongRef.current?.id) {
+          setCurrentSong(data.currentSong);
+          currentSongRef.current = data.currentSong;
+          lastSongChangeAtRef.current = Date.now();
+          
+          if (audioRef.current) {
+            audioRef.current.pause();
+            audioRef.current.currentTime = 0;
+          }
+          
+          // Force align time and play state after load
+          setTimeout(() => {
+            if (data?.currentTime !== undefined) {
+              setPendingSeek(Number(data.currentTime) || 0);
+            }
+            if (data?.isPlaying === false) {
+              pauseRef.current();
+            } else {
+              try { playRef.current(); } catch {}
+            }
+          }, 250);
         }
-        
-        // Fallback auto-play: if we're supposed to be playing but still paused, try to start after load
-        setTimeout(() => {
-          if (isPlayingRef.current && audioRef.current && audioRef.current.paused) {
+
+        // If joining and same song already set, still align time and play state
+        if (data?.type === 'room_state' && data?.currentSong?.id === currentSongRef.current?.id) {
+          if (data?.currentTime !== undefined) {
+            setPendingSeek(Number(data.currentTime) || 0);
+          }
+          if (data?.isPlaying === false) {
+            pauseRef.current();
+          } else {
             try { playRef.current(); } catch {}
           }
-          if (data.currentTime && data.currentTime > 0 && audioRef.current) {
-            audioRef.current.currentTime = data.currentTime;
+        }
+
+        // On explicit song_change events, force play unless room is paused
+        if (data?.type === 'song_change') {
+          lastSongChangeAtRef.current = Date.now();
+          if (data?.isPlaying === false) {
+            pauseRef.current();
+          } else {
+            try { playRef.current(); } catch {}
           }
-        }, 250);
-      }
+        }
       
       // Do not touch audio time here; FooterPlayer exclusively manages time to avoid loops
       
@@ -194,20 +400,27 @@ export default function Room() {
         const currentQueue = queueRef.current;
         const isDifferent = data.queue.length !== currentQueue.length || 
           data.queue.some((song, index) => !currentQueue[index] || song.id !== currentQueue[index].id);
+        const shouldApplyEmpty = data.queue.length > 0 || currentQueue.length === 0 || data.forceQueueClear;
         
-        if (isDifferent) {
+        if (isDifferent && shouldApplyEmpty) {
           // Update ref first to prevent conflicts
           queueRef.current = data.queue;
           // Then update state
           updateQueue(data.queue);
         }
       }
+
+      // Handle shuffle updates
+      if (typeof data.shuffleMode === 'boolean' && data.shuffleMode !== shuffleMode) {
+        setShuffleModeState(data.shuffleMode);
+      }
     });
     
     // Store broadcast functions globally for footer player
     window.roomSync = {
       broadcastPlayPause: (isPlaying) => {
-        serverSync.broadcastPlayPause(isPlaying, currentSongRef.current);
+        const currentTime = audioRef.current ? audioRef.current.currentTime : 0;
+        serverSync.broadcastPlayPause(isPlaying, currentSongRef.current, currentTime);
       },
       broadcastSongChange: (song) => {
         serverSync.broadcastSongChange(song);
@@ -217,6 +430,12 @@ export default function Room() {
       },
       broadcastQueueUpdate: (queue) => {
         serverSync.broadcastQueueUpdate(queue);
+      },
+      broadcastShuffle: (mode) => {
+        serverSync.broadcastShuffleMode(mode);
+      },
+      shuffleQueue: () => {
+        shuffleQueue();
       },
       onServerSync: (callback) => {
         // Store callback for progress bar sync
@@ -608,6 +827,9 @@ export default function Room() {
         if (isDifferent) {
           queueRef.current = sanitizedQueue;
           updateQueue(sanitizedQueue);
+          if (window.roomSync) {
+            window.roomSync.broadcastQueueUpdate(sanitizedQueue);
+          }
         }
       }
     } catch (_) {
@@ -655,7 +877,7 @@ export default function Room() {
       } else {
         // Fallback to local user if no data
         setRoomUsers([{
-          id: user.id,
+          user_id: user.id,
           username: user.username,
           avatar: user.avatar || '/music img.png',
           room_id: roomId,
@@ -666,7 +888,7 @@ export default function Room() {
       // console.error('Error loading room users:', error);
       // Fallback to local user
       setRoomUsers([{
-        id: user.id,
+        user_id: user.id,
         username: user.username,
         avatar: user.avatar || '/music img.png',
         room_id: roomId,
@@ -795,20 +1017,20 @@ export default function Room() {
     lastActionTimeRef.current = Date.now();
     
     // Simple toggle - let PlaybackContext handle the actual play/pause
-        if (isPlaying) {
+    if (isPlaying) {
       // Pausing
-          pause();
+      pause();
       // Broadcast pause to other users via Socket.io
       if (window.roomSync) {
         window.roomSync.broadcastPlayPause(false);
       }
-        } else {
+    } else {
       // Playing
-          play();
+      play();
       // Broadcast play to other users via Socket.io
       if (window.roomSync) {
         window.roomSync.broadcastPlayPause(true);
-        }
+      }
     }
   };
   
@@ -921,11 +1143,21 @@ export default function Room() {
     setIsPlaylistSearch(false);
     
     try {
-      const results = await resolveUrlOrSearch(searchQuery, 'youtube', { prefetch: false });
-      const filtered = (results || []).filter(r => r?.ytId);
-      setSearchResults(filtered);
       const isPlaylist = /list=/.test(searchQuery) || /youtube\.com\/playlist/.test(searchQuery);
-      setIsPlaylistSearch(isPlaylist && filtered.length > 0);
+      if (isPlaylist) {
+        const { fetchYouTubePlaylist, parseYouTubePlaylistId } = await import('../utils/media-resolver');
+        const listId = parseYouTubePlaylistId(searchQuery);
+        const results = await fetchYouTubePlaylist(listId, 500);
+        const filtered = (results || []).filter(r => r?.ytId);
+        setSearchResults(filtered);
+        setIsPlaylistSearch(filtered.length > 0);
+        setSearchVisibleCount(50);
+      } else {
+        const results = await resolveUrlOrSearch(searchQuery, 'youtube', { prefetch: false });
+        const filtered = (results || []).filter(r => r?.ytId);
+        setSearchResults(filtered);
+        setSearchVisibleCount(10);
+      }
     } catch (error) {
       // console.error('Search error:', error);
       setSearchError('Search failed. Please try again.');
@@ -978,6 +1210,12 @@ export default function Room() {
     addManyToQueue(songs);
     showNotification(`Added ${songs.length} songs to queue`);
   };
+
+  useEffect(() => {
+    if (queue.length <= 50) {
+      setQueueVisibleCount(queue.length || 50);
+    }
+  }, [queue.length]);
   
   const addToQueue = async (song) => {
     const newQueue = [...(queueRef.current || []), song];
@@ -988,7 +1226,18 @@ export default function Room() {
       window.roomSync.broadcastQueueUpdate(newQueue);
     }
 
-    // Skip Supabase for better performance
+    // Persist queue so it survives when room becomes empty
+    if (isSupabaseReal) {
+      supabase
+        .from('rooms')
+        .update({
+          queue: newQueue,
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', roomId)
+        .then(() => {})
+        .catch(() => {});
+    }
     return;
     
     try {
@@ -1007,35 +1256,33 @@ export default function Room() {
     }
   };
   
-  const playSong = async (song) => {
-    lastActionTimeRef.current = Date.now();
-    
-    // Update refs first to prevent conflicts
-    currentSongRef.current = song;
-    setCurrentSong(song);
-    
-    // Set up auto play next when song ends
-    if (audioRef.current) {
-      audioRef.current.onended = () => {
-        const currentQueue = queueRef.current;
-        const currentIndex = currentQueue.findIndex(s => s.id === song.id);
-        if (currentQueue.length === 0) return;
-        let nextIndex = (currentIndex + 1) % currentQueue.length;
-        if (shuffleMode && currentQueue.length > 1) {
-          let idx = currentIndex;
-          while (idx === currentIndex) {
-            idx = Math.floor(Math.random() * currentQueue.length);
-          }
-          nextIndex = idx;
+    const playSong = async (song) => {
+      lastActionTimeRef.current = Date.now();
+      
+      // Update refs first to prevent conflicts
+      currentSongRef.current = song;
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current.currentTime = 0;
+      }
+      const resolvedSong = await setCurrentSong(song);
+      if (resolvedSong?.url && song?.id) {
+        const currentQueue = queueRef.current || [];
+        const updatedQueue = currentQueue.map(item => item.id === song.id ? { ...item, url: resolvedSong.url, needsResolution: false } : item);
+        queueRef.current = updatedQueue;
+        updateQueue(updatedQueue);
+        if (window.roomSync) {
+          window.roomSync.broadcastQueueUpdate(updatedQueue);
         }
-        if (currentQueue[nextIndex]) {
-          playSong(currentQueue[nextIndex]);
-        }
-      };
-    }
-    
-    // Force play immediately with a small delay to ensure state is updated
-    setTimeout(() => {
+      }
+      
+      // Preload next song for smoother transitions
+      const upcomingSong = getNextSongFromQueue(song, queueRef.current);
+      if (upcomingSong) {
+        preloadSong(upcomingSong);
+      }
+      
+      // Play immediately after state update
       play();
       if (window.roomSync) {
         window.roomSync.broadcastSongChange(song);
@@ -1043,23 +1290,29 @@ export default function Room() {
         window.roomSync.broadcastSeek(0);
         window.roomSync.broadcastPlayPause(true);
       }
-    }, 50);
-  };
+    };
 
-  const handleSkipNext = async () => {
+    const handleSkipNext = async () => {
     // console.log('handleSkipNext called');
     const currentQueue = queueRef.current;
     // console.log('Current queue length:', currentQueue.length);
     // console.log('Current song from state:', currentSong?.title);
     // console.log('Current song from ref:', currentSongRef.current?.title);
     
-    if (currentQueue.length <= 1) {
-      // console.log('Only one song in queue, cannot skip');
-      return;
-    }
-    
     // Use ref if state is undefined
     const activeCurrentSong = currentSong || currentSongRef.current;
+    
+    if (currentQueue.length <= 1) {
+      if (activeCurrentSong?.id) {
+        removeSongFromQueue(activeCurrentSong.id);
+      }
+      pause();
+      setCurrentSong(null);
+      if (window.roomSync) {
+        window.roomSync.broadcastPlayPause(false);
+      }
+      return;
+    }
     // console.log('Active current song:', activeCurrentSong?.title);
     
     const currentIndex = currentQueue.findIndex(song => song.id === activeCurrentSong?.id);
@@ -1071,37 +1324,44 @@ export default function Room() {
       const firstSong = currentQueue[0];
       if (firstSong) {
         currentSongRef.current = firstSong;
-        setCurrentSong(firstSong);
+        await setCurrentSong(firstSong);
         play();
         if (window.roomSync) {
           window.roomSync.broadcastSongChange(firstSong);
+          window.roomSync.broadcastSeek(0);
           window.roomSync.broadcastPlayPause(true);
         }
       }
       return;
     }
     
-    let nextIndex = (currentIndex + 1) % currentQueue.length;
-    if (shuffleMode && currentQueue.length > 1) {
-      let idx = currentIndex;
-      while (idx === currentIndex) {
-        idx = Math.floor(Math.random() * currentQueue.length);
-      }
-      nextIndex = idx;
-    }
-    const nextSong = currentQueue[nextIndex];
+      let nextIndex = (currentIndex + 1) % currentQueue.length;
+      const nextSong = currentQueue[nextIndex];
     // console.log('Next index:', nextIndex);
     // console.log('Next song:', nextSong?.title);
     
-    if (nextSong && nextSong.id !== activeCurrentSong?.id) {
-      // console.log('Playing next song:', nextSong.title);
-      
-      // Update refs first to prevent conflicts
-      currentSongRef.current = nextSong;
-      lastActionTimeRef.current = Date.now();
-      
-      // Update state
-      setCurrentSong(nextSong);
+      if (nextSong && nextSong.id !== activeCurrentSong?.id) {
+        // console.log('Playing next song:', nextSong.title);
+        
+        // Update refs first to prevent conflicts
+        currentSongRef.current = nextSong;
+        lastActionTimeRef.current = Date.now();
+        
+        // Update state
+        if (audioRef.current) {
+          audioRef.current.pause();
+          audioRef.current.currentTime = 0;
+        }
+        const resolvedSong = await setCurrentSong(nextSong);
+        if (resolvedSong?.url && nextSong?.id) {
+          const currentQueueForUpdate = queueRef.current || [];
+          const updatedQueue = currentQueueForUpdate.map(item => item.id === nextSong.id ? { ...item, url: resolvedSong.url, needsResolution: false } : item);
+          queueRef.current = updatedQueue;
+          updateQueue(updatedQueue);
+          if (window.roomSync) {
+            window.roomSync.broadcastQueueUpdate(updatedQueue);
+          }
+        }
       
       // Stop current audio
       if (audioRef.current) {
@@ -1109,18 +1369,30 @@ export default function Room() {
         audioRef.current.currentTime = 0;
       }
       
-      // Play next song immediately
-      play();
+        // Play next song immediately
+        play();
+
+        // Preload upcoming song
+        const upcomingSong = getNextSongFromQueue(nextSong, queueRef.current);
+        if (upcomingSong) {
+          preloadSong(upcomingSong);
+        }
       
       // Broadcast changes
-      if (window.roomSync) {
-        window.roomSync.broadcastSongChange(nextSong);
-        window.roomSync.broadcastPlayPause(true);
+        if (window.roomSync) {
+          window.roomSync.broadcastSongChange(nextSong);
+          window.roomSync.broadcastSeek(0);
+          window.roomSync.broadcastPlayPause(true);
+        }
+
+        // Remove the previous song from queue so it doesn't repeat
+        if (activeCurrentSong?.id) {
+          removeSongFromQueue(activeCurrentSong.id);
+        }
+      } else {
+        // console.log('No valid next song found');
       }
-    } else {
-      // console.log('No valid next song found');
-    }
-  };
+    };
 
   const handleSkipPrevious = async () => {
     if (queue.length === 0) return;
@@ -1151,6 +1423,7 @@ export default function Room() {
     
     // Update queue
     updateQueue(newQueue);
+    queueRef.current = newQueue;
     
     // Update room queue if Supabase is available
     if (isSupabaseReal) {
@@ -1183,6 +1456,7 @@ export default function Room() {
     // Remove song from queue
     const newQueue = queue.filter(s => s.id !== song.id);
     updateQueue(newQueue);
+    queueRef.current = newQueue;
     
     // If we're deleting the current song, stop playback
     if (currentSong?.id === song.id) {
@@ -1330,13 +1604,13 @@ export default function Room() {
               <h2>🎵 Queue ({queue.length})</h2>
               <div className="queue-controls">
                 <button
-                  className="btn-secondary"
+                  className="btn-secondary youtube-search-btn"
                   onClick={() => setShowSearchSection(prev => !prev)}
                 >
                   {showSearchSection ? 'Hide YouTube Search' : 'YouTube Search'}
                 </button>
                 {uploadsEnabled && (
-                  <label className="btn-upload">
+                  <label className="btn-upload upload-btn">
                     Upload MP3
                     <input
                       type="file"
@@ -1379,7 +1653,7 @@ export default function Room() {
 
                 {searchResults.length > 0 && (
                   <div className="search-results">
-                    {searchResults.map((song) => (
+                    {searchResults.slice(0, searchVisibleCount).map((song) => (
                       <div key={`${song.ytId}_${song.title}`} className="search-result">
                         <img src={song.thumbnail || '/music img.png'} alt={song.title} />
                         <div className="song-info">
@@ -1390,6 +1664,14 @@ export default function Room() {
                         <button onClick={() => handlePlaySearchResult(song)}>Play</button>
                       </div>
                     ))}
+                    {searchResults.length > searchVisibleCount && (
+                      <button
+                        className="btn-secondary load-more-btn"
+                        onClick={() => setSearchVisibleCount(prev => prev + 50)}
+                      >
+                        Load More ({searchVisibleCount}/{searchResults.length})
+                      </button>
+                    )}
                   </div>
                 )}
               </div>
@@ -1401,7 +1683,7 @@ export default function Room() {
                   <p>No songs in queue. Add some music!</p>
                 </div>
               ) : (
-                queue.map((song, index) => (
+                queue.slice(0, queueVisibleCount).map((song, index) => (
                   <div key={song.id} className={`queue-item ${currentSong?.id === song.id ? 'current' : ''}`}>
                     <div className="song-info">
                       <img src={song.thumbnail} alt={song.title} />
@@ -1440,6 +1722,14 @@ export default function Room() {
                     </div>
               </div>
                 ))
+            )}
+            {queue.length > queueVisibleCount && (
+              <button
+                className="btn-secondary load-more-btn"
+                onClick={() => setQueueVisibleCount(prev => prev + 50)}
+              >
+                Show More ({queueVisibleCount}/{queue.length})
+              </button>
             )}
             </div>
         </div>

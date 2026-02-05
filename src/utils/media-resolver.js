@@ -134,7 +134,16 @@ export async function getYouTubeAudioUrl(videoId) {
   return withApiBase(`/api/youtube/stream/${encodeURIComponent(videoId)}`);
 }
 
-export async function fetchYouTubePlaylist(playlistId, limit = 20) {
+export async function warmYouTubeAudio(videoId) {
+  if (!videoId) return;
+  try {
+    await fetch(withApiBase(`/api/youtube/stream/${encodeURIComponent(videoId)}?warm=1`));
+  } catch {
+    // Silence warmup errors
+  }
+}
+
+export async function fetchYouTubePlaylist(playlistId, limit = 300) {
   try {
     const res = await fetch(withApiBase(`/api/youtube/playlist?list=${encodeURIComponent(playlistId)}&limit=${limit}`));
     if (res.ok) {

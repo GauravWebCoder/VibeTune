@@ -121,11 +121,14 @@ class ServerSync {
           currentSong: this.sanitizeSongData(state?.currentSong),
           type: 'room_state'
         };
+        if (typeof state?.shuffleMode === 'boolean') {
+          data.shuffleMode = state.shuffleMode;
+        }
         this.notifyListeners('roomUpdate', data);
       });
 
       this.socket.on('sync_event', (evt) => {
-        const { type, payload } = evt || {};
+        const { type, payload, fromUserId } = evt || {};
         if (!type) return;
         this.lastSocketTickAt = Date.now();
         const normalized = {
@@ -133,13 +136,20 @@ class ServerSync {
           isPlaying: type === 'play' ? true : type === 'pause' ? false : undefined,
           currentTime: payload?.currentTime ?? payload?.currentPosition,
           duration: payload?.duration,
-          timestamp: Date.now()
+          timestamp: Date.now(),
+          fromUserId
         };
+        if (typeof payload?.shuffleMode === 'boolean') {
+          normalized.shuffleMode = payload.shuffleMode;
+        }
         if (payload?.currentSong) {
           normalized.currentSong = this.sanitizeSongData(payload.currentSong);
         }
         if (Array.isArray(payload?.queue)) {
           normalized.queue = this.sanitizeQueue(payload.queue);
+          if (payload?.forceQueueClear) {
+            normalized.forceQueueClear = true;
+          }
         }
         this.notifyListeners('roomUpdate', normalized);
       });
@@ -246,7 +256,7 @@ class ServerSync {
     }
   }
 
-  async broadcastPlayPause(isPlaying, currentSong) {
+  async broadcastPlayPause(isPlaying, currentSong, currentTime) {
     if (!this.roomId) return;
     
     // Broadcasting play/pause
@@ -256,7 +266,10 @@ class ServerSync {
         this.socket.emit('sync_event', {
           roomId: this.roomId,
           type: isPlaying ? 'play' : 'pause',
-          payload: { currentSong: this.sanitizeSongData(currentSong) || null }
+          payload: { 
+            currentSong: this.sanitizeSongData(currentSong) || null,
+            currentTime
+          }
         });
         return;
       } catch (_) {}
@@ -273,7 +286,7 @@ class ServerSync {
           body: JSON.stringify({
             roomId: this.roomId,
             type: 'playPause',
-            data: { isPlaying, currentSong: this.sanitizeSongData(currentSong) || null }
+            data: { isPlaying, currentSong: this.sanitizeSongData(currentSong) || null, currentTime }
           })
         });
         
@@ -290,6 +303,7 @@ class ServerSync {
     this.updateLocalStorage({
       isPlaying,
       currentSong,
+      currentTime,
       type: 'playPause'
     });
   }
@@ -392,12 +406,13 @@ class ServerSync {
     
     // Broadcasting queue update
     
+    const forceQueueClear = Array.isArray(queue) && queue.length === 0;
     if (this.socket && this.socket.connected) {
       try {
         this.socket.emit('sync_event', {
           roomId: this.roomId,
           type: 'queue_update',
-          payload: { queue: this.sanitizeQueue(queue) }
+          payload: { queue: this.sanitizeQueue(queue), forceQueueClear }
         });
         return;
       } catch (_) {}
@@ -413,7 +428,7 @@ class ServerSync {
           body: JSON.stringify({
             roomId: this.roomId,
             type: 'queueUpdate',
-            data: { queue: this.sanitizeQueue(queue) }
+            data: { queue: this.sanitizeQueue(queue), forceQueueClear }
           })
         });
         
@@ -429,7 +444,26 @@ class ServerSync {
     // Fallback to localStorage
     this.updateLocalStorage({
       queue: queue,
-      type: 'queueUpdate'
+      type: 'queueUpdate',
+      forceQueueClear
+    });
+  }
+
+  async broadcastShuffleMode(shuffleMode) {
+    if (!this.roomId) return;
+    if (this.socket && this.socket.connected) {
+      try {
+        this.socket.emit('sync_event', {
+          roomId: this.roomId,
+          type: 'shuffle',
+          payload: { shuffleMode: !!shuffleMode }
+        });
+        return;
+      } catch (_) {}
+    }
+    this.updateLocalStorage({
+      shuffleMode: !!shuffleMode,
+      type: 'shuffle'
     });
   }
 
