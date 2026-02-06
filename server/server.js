@@ -33,6 +33,7 @@ const io = socketIo(server, {
 // Store room data
 const rooms = new Map();
 const streamCache = new Map();
+const DEFAULT_UA = process.env.HTTP_UA || 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36';
 
 function isValidYouTubeId(id) {
   return typeof id === 'string' && /^[a-zA-Z0-9_-]{11}$/.test(id);
@@ -69,7 +70,13 @@ function getInvidiousInstances() {
 function fetchJson(url) {
   return new Promise((resolve, reject) => {
     const client = url.startsWith('http://') ? http : https;
-    client.get(url, (res) => {
+    const req = client.request(url, {
+      headers: {
+        'User-Agent': DEFAULT_UA,
+        'Accept': 'application/json',
+        'Accept-Language': 'en-US,en;q=0.9'
+      }
+    }, (res) => {
       let data = '';
       res.on('data', chunk => { data += chunk; });
       res.on('end', () => {
@@ -86,13 +93,21 @@ function fetchJson(url) {
           reject(err);
         }
       });
-    }).on('error', reject);
+    });
+    req.setTimeout(8000, () => {
+      req.destroy(new Error('Request timeout'));
+    });
+    req.on('error', reject);
+    req.end();
   });
 }
 
 function proxyStream(url, req, res) {
   const client = url.startsWith('http://') ? http : https;
-  const headers = {};
+  const headers = {
+    'User-Agent': DEFAULT_UA,
+    'Accept': '*/*'
+  };
   if (req.headers.range) {
     headers.Range = req.headers.range;
   }
@@ -370,6 +385,35 @@ async function fetchPipedSearch(query, limit) {
           };
         })
         .filter(it => it.ytId);
+      return results;
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  if (lastError) throw lastError;
+  return [];
+}
+
+async function fetchInvidiousSearch(query, limit) {
+  const instances = getInvidiousInstances();
+  let lastError = null;
+  for (const base of instances) {
+    try {
+      const invUrl = `${base}/api/v1/search?q=${encodeURIComponent(query)}&type=video&sort_by=relevance`;
+      const data = await fetchJson(invUrl);
+      const items = Array.isArray(data) ? data : data?.items || [];
+      const results = items
+        .map(v => {
+          const ytId = v?.videoId || v?.id;
+          return {
+            ytId,
+            title: v?.title || 'Unknown',
+            artist: v?.author || v?.uploader || 'YouTube',
+            thumbnail: v?.videoThumbnails?.[0]?.url || v?.thumbnail || ''
+          };
+        })
+        .filter(it => it.ytId)
+        .slice(0, limit);
       return results;
     } catch (err) {
       lastError = err;
@@ -682,8 +726,13 @@ app.get('/api/youtube/search', async (req, res) => {
       return res.json({ items });
     }
 
-    const results = await fetchPipedSearch(q, limit);
-    return res.json({ items: results });
+    try {
+      const results = await fetchPipedSearch(q, limit);
+      return res.json({ items: results });
+    } catch (pipedErr) {
+      const results = await fetchInvidiousSearch(q, limit);
+      return res.json({ items: results });
+    }
   } catch (error) {
     return res.status(500).json({ error: 'YouTube search failed' });
   }
