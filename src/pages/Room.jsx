@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
 import { usePlayback } from '../hooks/usePlayback';
 import { supabase, isSupabaseReal } from '../lib/supabase';
@@ -9,7 +9,6 @@ import { resolveUrlOrSearch } from '../utils/media-resolver';
 
 export default function Room() {
   const { roomId } = useParams();
-  const navigate = useNavigate();
   const { user } = useAuth();
   const { 
     currentSong, 
@@ -1237,22 +1236,6 @@ export default function Room() {
         .eq('id', roomId)
         .then(() => {})
         .catch(() => {});
-    }
-    return;
-    
-    try {
-      const { error } = await supabase
-        .from('rooms')
-        .update({
-          queue: newQueue
-        })
-        .eq('id', roomId);
-      
-      if (error) {
-        // console.error('Error adding to queue:', error);
-      }
-    } catch (error) {
-      // console.error('Error adding to queue:', error);
     }
   };
   

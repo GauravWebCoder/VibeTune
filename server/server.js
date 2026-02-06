@@ -47,7 +47,22 @@ function getPipedInstances() {
     'https://pipedapi.kavin.rocks',
     'https://piped.mha.fi',
     'https://piped.projectsegfau.lt',
-    'https://piped.privacydev.net'
+    'https://piped.privacydev.net',
+    'https://piped.lunar.icu',
+    'https://piped.privacy.com.de',
+    'https://piped.privacy.party'
+  ];
+}
+
+function getInvidiousInstances() {
+  const raw = process.env.INVIDIOUS_BASES || '';
+  const list = raw.split(',').map(v => v.trim()).filter(Boolean);
+  if (list.length > 0) return list;
+  return [
+    'https://inv.nadeko.net',
+    'https://y.com.sb',
+    'https://vid.puffyan.us',
+    'https://invidious.privacydev.net'
   ];
 }
 
@@ -383,6 +398,27 @@ async function fetchPipedStreamUrl(videoId) {
   }
   if (lastError) throw lastError;
   throw new Error('No Piped stream available');
+}
+
+async function fetchInvidiousStreamUrl(videoId) {
+  const instances = getInvidiousInstances();
+  let lastError = null;
+  for (const base of instances) {
+    try {
+      const data = await fetchJson(`${base}/api/v1/videos/${videoId}`);
+      const formats = Array.isArray(data?.adaptiveFormats) ? data.adaptiveFormats : [];
+      const audio = formats
+        .filter(f => (f?.type || '').startsWith('audio/') && f?.url)
+        .sort((a, b) => (b?.bitrate || 0) - (a?.bitrate || 0))[0];
+      if (audio?.url) {
+        return { url: audio.url, mimeType: audio?.type || 'audio/mpeg' };
+      }
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  if (lastError) throw lastError;
+  throw new Error('No Invidious stream available');
 }
 
 function getCachedStream(videoId) {
@@ -731,7 +767,18 @@ app.get('/api/youtube/stream/:id', async (req, res) => {
       return proxyStream(stream.url, req, res);
     } catch (fallbackError) {
       console.error('Piped fallback failed:', fallbackError?.message || fallbackError);
-      return res.status(500).json({ error: 'Failed to stream YouTube audio' });
+      try {
+        const stream = await fetchInvidiousStreamUrl(videoId);
+        res.setHeader('Content-Type', (stream?.mimeType || 'audio/mpeg').split(';')[0]);
+        res.setHeader('Accept-Ranges', 'bytes');
+        if (stream?.url) {
+          setCachedYtUrl(videoId, stream.url);
+        }
+        return proxyStream(stream.url, req, res);
+      } catch (invError) {
+        console.error('Invidious fallback failed:', invError?.message || invError);
+        return res.status(500).json({ error: 'Failed to stream YouTube audio' });
+      }
     }
   }
 });

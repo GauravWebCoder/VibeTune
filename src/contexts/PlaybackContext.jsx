@@ -18,7 +18,6 @@ export const PlaybackProvider = ({ children }) => {
   const preloadAudioRef = useRef(null);
   const skipNextCallbackRef = useRef(null);
   const syncCallbackRef = useRef(null);
-  const loadedTracksRef = useRef(new Map()); // Track loaded audio elements
   const pendingPlayRef = useRef(false);
   const pendingSeekRef = useRef(null);
   
