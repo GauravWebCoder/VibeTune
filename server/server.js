@@ -280,6 +280,52 @@ async function getYtDlpPlaylistItems(listId, limit = 50) {
   return items;
 }
 
+async function getYtDlpSearchResults(query, limit = 10) {
+  const searchUrl = `ytsearch${limit}:${query}`;
+  const args = [
+    '--no-playlist',
+    '-J',
+    searchUrl
+  ];
+
+  let output = '';
+  try {
+    output = await runYtDlp(args);
+  } catch (err) {
+    try {
+      output = await runYtDlpViaPython3(args);
+    } catch (pyErr) {
+      try {
+        output = await runYtDlpViaPython(args);
+      } catch (py2Err) {
+        output = await runYtDlpViaPyLauncher(args);
+      }
+    }
+  }
+
+  if (!output) {
+    throw new Error('yt-dlp search returned empty output');
+  }
+
+  let data = null;
+  try {
+    data = JSON.parse(output);
+  } catch (e) {
+    throw new Error('yt-dlp search JSON parse failed');
+  }
+
+  const entries = Array.isArray(data?.entries) ? data.entries : [];
+  return entries
+    .filter(e => e?.id)
+    .map(e => ({
+      ytId: e.id,
+      title: e.title || 'Unknown',
+      artist: e.uploader || e.channel || 'YouTube',
+      thumbnail: e.id ? `https://i.ytimg.com/vi/${e.id}/hqdefault.jpg` : ''
+    }))
+    .slice(0, limit);
+}
+
 async function listAllStorageFiles(client, bucket, prefix = '') {
   const files = [];
   let offset = 0;
@@ -730,11 +776,16 @@ app.get('/api/youtube/search', async (req, res) => {
       const results = await fetchPipedSearch(q, limit);
       return res.json({ items: results });
     } catch (pipedErr) {
-      const results = await fetchInvidiousSearch(q, limit);
-      return res.json({ items: results });
+      try {
+        const results = await fetchInvidiousSearch(q, limit);
+        return res.json({ items: results });
+      } catch (invErr) {
+        const results = await getYtDlpSearchResults(q, limit);
+        return res.json({ items: results });
+      }
     }
   } catch (error) {
-    return res.status(500).json({ error: 'YouTube search failed' });
+    return res.status(200).json({ items: [] });
   }
 });
 
