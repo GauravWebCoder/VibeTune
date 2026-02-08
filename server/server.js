@@ -12,6 +12,8 @@ dotenv.config({ path: path.resolve(__dirname, '..', '.env') });
 
 const app = express();
 const server = http.createServer(app);
+http.globalAgent.keepAlive = true;
+https.globalAgent.keepAlive = true;
 
 // Enable CORS for all origins
 app.use(cors({
@@ -33,8 +35,11 @@ const io = socketIo(server, {
 // Store room data
 const rooms = new Map();
 const streamCache = new Map();
+const instanceHealth = new Map();
 const DEFAULT_UA = process.env.HTTP_UA || 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36';
 const SEARCH_CACHE_TTL_MS = Number(process.env.SEARCH_CACHE_TTL_MS || 2 * 60 * 1000);
+const SEARCH_CACHE_MAX = Number(process.env.SEARCH_CACHE_MAX || 200);
+const STREAM_CACHE_MAX = Number(process.env.STREAM_CACHE_MAX || 200);
 const searchCache = new Map();
 
 function isValidYouTubeId(id) {
@@ -111,6 +116,31 @@ function fetchJsonWithTimeout(url, timeoutMs = 5000) {
   ]);
 }
 
+function markInstanceFailure(base) {
+  const current = instanceHealth.get(base) || { failures: 0, cooldownUntil: 0 };
+  const failures = current.failures + 1;
+  const cooldownUntil = failures >= 2 ? Date.now() + 2 * 60 * 1000 : current.cooldownUntil;
+  instanceHealth.set(base, { failures, cooldownUntil });
+}
+
+function markInstanceSuccess(base) {
+  instanceHealth.set(base, { failures: 0, cooldownUntil: 0 });
+}
+
+function isInstanceHealthy(base) {
+  const entry = instanceHealth.get(base);
+  if (!entry) return true;
+  return entry.cooldownUntil <= Date.now();
+}
+
+function pruneCache(map, maxEntries) {
+  while (map.size > maxEntries) {
+    const firstKey = map.keys().next().value;
+    if (!firstKey) break;
+    map.delete(firstKey);
+  }
+}
+
 function getCachedSearch(query, limit) {
   const key = `${query}::${limit}`;
   const entry = searchCache.get(key);
@@ -128,6 +158,7 @@ function setCachedSearch(query, limit, items) {
     items,
     expiresAt: Date.now() + SEARCH_CACHE_TTL_MS
   });
+  pruneCache(searchCache, SEARCH_CACHE_MAX);
 }
 
 function proxyStream(url, req, res) {
@@ -216,6 +247,7 @@ function setCachedYtUrl(videoId, url) {
     url,
     expiresAt: Date.now() + YT_URL_CACHE_TTL_MS
   });
+  pruneCache(ytUrlCache, STREAM_CACHE_MAX);
 }
 
 async function getYtDlpAudioUrl(videoId) {
@@ -439,104 +471,114 @@ function startSupabaseCleanup() {
 }
 
 async function fetchPipedSearch(query, limit) {
-  const instances = getPipedInstances().slice(0, 3);
-  const tasks = instances.map(base => (async () => {
-    const pipedUrl = `${base}/api/v1/search?q=${encodeURIComponent(query)}&region=US`;
-    const data = await fetchJsonWithTimeout(pipedUrl, 4500);
-    const items = Array.isArray(data) ? data : data?.items || [];
-    return items
-      .filter(v => v?.url || v?.id || v?.videoId)
-      .slice(0, limit)
-      .map(v => {
-        const videoId = v?.id || v?.videoId || v?.shortsId || (v?.url ? v.url.replace('/watch?v=', '').split('&')[0] : '');
-        return {
-          ytId: videoId,
-          title: v?.title || 'Unknown',
-          artist: v?.uploader || v?.author || 'YouTube',
-          thumbnail: v?.thumbnail || v?.thumbnailUrl || v?.thumbnailSrc || ''
-        };
-      })
-      .filter(it => it.ytId);
+  const instances = getPipedInstances().filter(isInstanceHealthy).slice(0, 3);
+  const targets = instances.length ? instances : getPipedInstances().slice(0, 3);
+  const tasks = targets.map(base => (async () => {
+    try {
+      const pipedUrl = `${base}/api/v1/search?q=${encodeURIComponent(query)}&region=US`;
+      const data = await fetchJsonWithTimeout(pipedUrl, 4500);
+      const items = Array.isArray(data) ? data : data?.items || [];
+      const results = items
+        .filter(v => v?.url || v?.id || v?.videoId)
+        .slice(0, limit)
+        .map(v => {
+          const videoId = v?.id || v?.videoId || v?.shortsId || (v?.url ? v.url.replace('/watch?v=', '').split('&')[0] : '');
+          return {
+            ytId: videoId,
+            title: v?.title || 'Unknown',
+            artist: v?.uploader || v?.author || 'YouTube',
+            thumbnail: v?.thumbnail || v?.thumbnailUrl || v?.thumbnailSrc || ''
+          };
+        })
+        .filter(it => it.ytId);
+      markInstanceSuccess(base);
+      return results;
+    } catch (err) {
+      markInstanceFailure(base);
+      throw err;
+    }
   })());
 
-  try {
-    const results = await Promise.any(tasks);
-    return results;
-  } catch (err) {
-    throw err;
-  }
+  return await Promise.any(tasks);
 }
 
 async function fetchInvidiousSearch(query, limit) {
-  const instances = getInvidiousInstances().slice(0, 2);
-  const tasks = instances.map(base => (async () => {
-    const invUrl = `${base}/api/v1/search?q=${encodeURIComponent(query)}&type=video&sort_by=relevance`;
-    const data = await fetchJsonWithTimeout(invUrl, 4500);
-    const items = Array.isArray(data) ? data : data?.items || [];
-    return items
-      .map(v => {
-        const ytId = v?.videoId || v?.id;
-        return {
-          ytId,
-          title: v?.title || 'Unknown',
-          artist: v?.author || v?.uploader || 'YouTube',
-          thumbnail: v?.videoThumbnails?.[0]?.url || v?.thumbnail || ''
-        };
-      })
-      .filter(it => it.ytId)
-      .slice(0, limit);
+  const instances = getInvidiousInstances().filter(isInstanceHealthy).slice(0, 2);
+  const targets = instances.length ? instances : getInvidiousInstances().slice(0, 2);
+  const tasks = targets.map(base => (async () => {
+    try {
+      const invUrl = `${base}/api/v1/search?q=${encodeURIComponent(query)}&type=video&sort_by=relevance`;
+      const data = await fetchJsonWithTimeout(invUrl, 4500);
+      const items = Array.isArray(data) ? data : data?.items || [];
+      const results = items
+        .map(v => {
+          const ytId = v?.videoId || v?.id;
+          return {
+            ytId,
+            title: v?.title || 'Unknown',
+            artist: v?.author || v?.uploader || 'YouTube',
+            thumbnail: v?.videoThumbnails?.[0]?.url || v?.thumbnail || ''
+          };
+        })
+        .filter(it => it.ytId)
+        .slice(0, limit);
+      markInstanceSuccess(base);
+      return results;
+    } catch (err) {
+      markInstanceFailure(base);
+      throw err;
+    }
   })());
 
-  try {
-    const results = await Promise.any(tasks);
-    return results;
-  } catch (err) {
-    throw err;
-  }
+  return await Promise.any(tasks);
 }
 
 async function fetchPipedStreamUrl(videoId) {
-  const instances = getPipedInstances().slice(0, 3);
-  const tasks = instances.map(base => (async () => {
-    const data = await fetchJsonWithTimeout(`${base}/api/v1/streams/${videoId}`, 6000);
-    const streams = Array.isArray(data?.audioStreams) ? data.audioStreams : [];
-    const best = streams
-      .filter(s => s?.url)
-      .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
-    if (best?.url) {
-      return { url: best.url, mimeType: best?.mimeType || 'audio/mpeg' };
+  const instances = getPipedInstances().filter(isInstanceHealthy).slice(0, 3);
+  const targets = instances.length ? instances : getPipedInstances().slice(0, 3);
+  const tasks = targets.map(base => (async () => {
+    try {
+      const data = await fetchJsonWithTimeout(`${base}/api/v1/streams/${videoId}`, 6000);
+      const streams = Array.isArray(data?.audioStreams) ? data.audioStreams : [];
+      const best = streams
+        .filter(s => s?.url)
+        .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+      if (best?.url) {
+        markInstanceSuccess(base);
+        return { url: best.url, mimeType: best?.mimeType || 'audio/mpeg' };
+      }
+      throw new Error('No Piped audio stream');
+    } catch (err) {
+      markInstanceFailure(base);
+      throw err;
     }
-    throw new Error('No Piped audio stream');
   })());
 
-  try {
-    const stream = await Promise.any(tasks);
-    return stream;
-  } catch (err) {
-    throw err;
-  }
+  return await Promise.any(tasks);
 }
 
 async function fetchInvidiousStreamUrl(videoId) {
-  const instances = getInvidiousInstances().slice(0, 2);
-  const tasks = instances.map(base => (async () => {
-    const data = await fetchJsonWithTimeout(`${base}/api/v1/videos/${videoId}`, 6000);
-    const formats = Array.isArray(data?.adaptiveFormats) ? data.adaptiveFormats : [];
-    const audio = formats
-      .filter(f => (f?.type || '').startsWith('audio/') && f?.url)
-      .sort((a, b) => (b?.bitrate || 0) - (a?.bitrate || 0))[0];
-    if (audio?.url) {
-      return { url: audio.url, mimeType: audio?.type || 'audio/mpeg' };
+  const instances = getInvidiousInstances().filter(isInstanceHealthy).slice(0, 2);
+  const targets = instances.length ? instances : getInvidiousInstances().slice(0, 2);
+  const tasks = targets.map(base => (async () => {
+    try {
+      const data = await fetchJsonWithTimeout(`${base}/api/v1/videos/${videoId}`, 6000);
+      const formats = Array.isArray(data?.adaptiveFormats) ? data.adaptiveFormats : [];
+      const audio = formats
+        .filter(f => (f?.type || '').startsWith('audio/') && f?.url)
+        .sort((a, b) => (b?.bitrate || 0) - (a?.bitrate || 0))[0];
+      if (audio?.url) {
+        markInstanceSuccess(base);
+        return { url: audio.url, mimeType: audio?.type || 'audio/mpeg' };
+      }
+      throw new Error('No Invidious audio stream');
+    } catch (err) {
+      markInstanceFailure(base);
+      throw err;
     }
-    throw new Error('No Invidious audio stream');
   })());
 
-  try {
-    const stream = await Promise.any(tasks);
-    return stream;
-  } catch (err) {
-    throw err;
-  }
+  return await Promise.any(tasks);
 }
 
 function getCachedStream(videoId) {
@@ -553,6 +595,7 @@ function cacheStream(videoId, audioUrl) {
   const match = /[?&]expire=(\d+)/.exec(audioUrl || '');
   const expiresAt = match ? Number(match[1]) * 1000 : Date.now() + 5 * 60 * 1000;
   streamCache.set(videoId, { audioUrl, expiresAt });
+  pruneCache(streamCache, STREAM_CACHE_MAX);
 }
 
 // Helper function to get or create room
