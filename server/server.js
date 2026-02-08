@@ -34,6 +34,8 @@ const io = socketIo(server, {
 const rooms = new Map();
 const streamCache = new Map();
 const DEFAULT_UA = process.env.HTTP_UA || 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36';
+const SEARCH_CACHE_TTL_MS = Number(process.env.SEARCH_CACHE_TTL_MS || 2 * 60 * 1000);
+const searchCache = new Map();
 
 function isValidYouTubeId(id) {
   return typeof id === 'string' && /^[a-zA-Z0-9_-]{11}$/.test(id);
@@ -99,6 +101,32 @@ function fetchJson(url) {
     });
     req.on('error', reject);
     req.end();
+  });
+}
+
+function fetchJsonWithTimeout(url, timeoutMs = 5000) {
+  return Promise.race([
+    fetchJson(url),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('Request timeout')), timeoutMs))
+  ]);
+}
+
+function getCachedSearch(query, limit) {
+  const key = `${query}::${limit}`;
+  const entry = searchCache.get(key);
+  if (!entry) return null;
+  if (entry.expiresAt <= Date.now()) {
+    searchCache.delete(key);
+    return null;
+  }
+  return entry.items;
+}
+
+function setCachedSearch(query, limit, items) {
+  const key = `${query}::${limit}`;
+  searchCache.set(key, {
+    items,
+    expiresAt: Date.now() + SEARCH_CACHE_TTL_MS
   });
 }
 
@@ -411,104 +439,104 @@ function startSupabaseCleanup() {
 }
 
 async function fetchPipedSearch(query, limit) {
-  const instances = getPipedInstances();
-  let lastError = null;
-  for (const base of instances) {
-    try {
-      const pipedUrl = `${base}/api/v1/search?q=${encodeURIComponent(query)}&region=US`;
-      const data = await fetchJson(pipedUrl);
-      const items = Array.isArray(data) ? data : data?.items || [];
-      const results = items
-        .filter(v => v?.url || v?.id || v?.videoId)
-        .slice(0, limit)
-        .map(v => {
-          const videoId = v?.id || v?.videoId || v?.shortsId || (v?.url ? v.url.replace('/watch?v=', '').split('&')[0] : '');
-          return {
-            ytId: videoId,
-            title: v?.title || 'Unknown',
-            artist: v?.uploader || v?.author || 'YouTube',
-            thumbnail: v?.thumbnail || v?.thumbnailUrl || v?.thumbnailSrc || ''
-          };
-        })
-        .filter(it => it.ytId);
-      return results;
-    } catch (err) {
-      lastError = err;
-    }
+  const instances = getPipedInstances().slice(0, 3);
+  const tasks = instances.map(base => (async () => {
+    const pipedUrl = `${base}/api/v1/search?q=${encodeURIComponent(query)}&region=US`;
+    const data = await fetchJsonWithTimeout(pipedUrl, 4500);
+    const items = Array.isArray(data) ? data : data?.items || [];
+    return items
+      .filter(v => v?.url || v?.id || v?.videoId)
+      .slice(0, limit)
+      .map(v => {
+        const videoId = v?.id || v?.videoId || v?.shortsId || (v?.url ? v.url.replace('/watch?v=', '').split('&')[0] : '');
+        return {
+          ytId: videoId,
+          title: v?.title || 'Unknown',
+          artist: v?.uploader || v?.author || 'YouTube',
+          thumbnail: v?.thumbnail || v?.thumbnailUrl || v?.thumbnailSrc || ''
+        };
+      })
+      .filter(it => it.ytId);
+  })());
+
+  try {
+    const results = await Promise.any(tasks);
+    return results;
+  } catch (err) {
+    throw err;
   }
-  if (lastError) throw lastError;
-  return [];
 }
 
 async function fetchInvidiousSearch(query, limit) {
-  const instances = getInvidiousInstances();
-  let lastError = null;
-  for (const base of instances) {
-    try {
-      const invUrl = `${base}/api/v1/search?q=${encodeURIComponent(query)}&type=video&sort_by=relevance`;
-      const data = await fetchJson(invUrl);
-      const items = Array.isArray(data) ? data : data?.items || [];
-      const results = items
-        .map(v => {
-          const ytId = v?.videoId || v?.id;
-          return {
-            ytId,
-            title: v?.title || 'Unknown',
-            artist: v?.author || v?.uploader || 'YouTube',
-            thumbnail: v?.videoThumbnails?.[0]?.url || v?.thumbnail || ''
-          };
-        })
-        .filter(it => it.ytId)
-        .slice(0, limit);
-      return results;
-    } catch (err) {
-      lastError = err;
-    }
+  const instances = getInvidiousInstances().slice(0, 2);
+  const tasks = instances.map(base => (async () => {
+    const invUrl = `${base}/api/v1/search?q=${encodeURIComponent(query)}&type=video&sort_by=relevance`;
+    const data = await fetchJsonWithTimeout(invUrl, 4500);
+    const items = Array.isArray(data) ? data : data?.items || [];
+    return items
+      .map(v => {
+        const ytId = v?.videoId || v?.id;
+        return {
+          ytId,
+          title: v?.title || 'Unknown',
+          artist: v?.author || v?.uploader || 'YouTube',
+          thumbnail: v?.videoThumbnails?.[0]?.url || v?.thumbnail || ''
+        };
+      })
+      .filter(it => it.ytId)
+      .slice(0, limit);
+  })());
+
+  try {
+    const results = await Promise.any(tasks);
+    return results;
+  } catch (err) {
+    throw err;
   }
-  if (lastError) throw lastError;
-  return [];
 }
 
 async function fetchPipedStreamUrl(videoId) {
-  const instances = getPipedInstances();
-  let lastError = null;
-  for (const base of instances) {
-    try {
-      const data = await fetchJson(`${base}/api/v1/streams/${videoId}`);
-      const streams = Array.isArray(data?.audioStreams) ? data.audioStreams : [];
-      const best = streams
-        .filter(s => s?.url)
-        .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
-      if (best?.url) {
-        return { url: best.url, mimeType: best?.mimeType || 'audio/mpeg' };
-      }
-    } catch (err) {
-      lastError = err;
+  const instances = getPipedInstances().slice(0, 3);
+  const tasks = instances.map(base => (async () => {
+    const data = await fetchJsonWithTimeout(`${base}/api/v1/streams/${videoId}`, 6000);
+    const streams = Array.isArray(data?.audioStreams) ? data.audioStreams : [];
+    const best = streams
+      .filter(s => s?.url)
+      .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+    if (best?.url) {
+      return { url: best.url, mimeType: best?.mimeType || 'audio/mpeg' };
     }
+    throw new Error('No Piped audio stream');
+  })());
+
+  try {
+    const stream = await Promise.any(tasks);
+    return stream;
+  } catch (err) {
+    throw err;
   }
-  if (lastError) throw lastError;
-  throw new Error('No Piped stream available');
 }
 
 async function fetchInvidiousStreamUrl(videoId) {
-  const instances = getInvidiousInstances();
-  let lastError = null;
-  for (const base of instances) {
-    try {
-      const data = await fetchJson(`${base}/api/v1/videos/${videoId}`);
-      const formats = Array.isArray(data?.adaptiveFormats) ? data.adaptiveFormats : [];
-      const audio = formats
-        .filter(f => (f?.type || '').startsWith('audio/') && f?.url)
-        .sort((a, b) => (b?.bitrate || 0) - (a?.bitrate || 0))[0];
-      if (audio?.url) {
-        return { url: audio.url, mimeType: audio?.type || 'audio/mpeg' };
-      }
-    } catch (err) {
-      lastError = err;
+  const instances = getInvidiousInstances().slice(0, 2);
+  const tasks = instances.map(base => (async () => {
+    const data = await fetchJsonWithTimeout(`${base}/api/v1/videos/${videoId}`, 6000);
+    const formats = Array.isArray(data?.adaptiveFormats) ? data.adaptiveFormats : [];
+    const audio = formats
+      .filter(f => (f?.type || '').startsWith('audio/') && f?.url)
+      .sort((a, b) => (b?.bitrate || 0) - (a?.bitrate || 0))[0];
+    if (audio?.url) {
+      return { url: audio.url, mimeType: audio?.type || 'audio/mpeg' };
     }
+    throw new Error('No Invidious audio stream');
+  })());
+
+  try {
+    const stream = await Promise.any(tasks);
+    return stream;
+  } catch (err) {
+    throw err;
   }
-  if (lastError) throw lastError;
-  throw new Error('No Invidious stream available');
 }
 
 function getCachedStream(videoId) {
@@ -758,6 +786,11 @@ app.get('/api/youtube/search', async (req, res) => {
     return res.status(400).json({ error: 'Missing query' });
   }
 
+  const cached = getCachedSearch(q, limit);
+  if (cached) {
+    return res.json({ items: cached });
+  }
+
   const apiKey = process.env.YOUTUBE_API_KEY || process.env.VITE_YOUTUBE_API_KEY || '';
   try {
     if (apiKey) {
@@ -769,18 +802,22 @@ app.get('/api/youtube/search', async (req, res) => {
         artist: it?.snippet?.channelTitle || 'YouTube',
         thumbnail: it?.snippet?.thumbnails?.medium?.url || it?.snippet?.thumbnails?.default?.url || ''
       })).filter(it => it.ytId);
+      setCachedSearch(q, limit, items);
       return res.json({ items });
     }
 
     try {
       const results = await fetchPipedSearch(q, limit);
+      setCachedSearch(q, limit, results);
       return res.json({ items: results });
     } catch (pipedErr) {
       try {
         const results = await fetchInvidiousSearch(q, limit);
+        setCachedSearch(q, limit, results);
         return res.json({ items: results });
       } catch (invErr) {
         const results = await getYtDlpSearchResults(q, limit);
+        setCachedSearch(q, limit, results);
         return res.json({ items: results });
       }
     }
@@ -848,12 +885,29 @@ app.get('/api/youtube/stream/:id', async (req, res) => {
   res.setHeader('Access-Control-Expose-Headers', 'Content-Range, Accept-Ranges, Content-Length');
 
   try {
+    const cachedStream = getCachedStream(videoId);
+    if (cachedStream) {
+      res.setHeader('Accept-Ranges', 'bytes');
+      return proxyStream(cachedStream, req, res);
+    }
+
     if (String(req.query.warm || '') === '1') {
-      await getYtDlpAudioUrl(videoId);
-      return res.status(204).end();
+      try {
+        await getYtDlpAudioUrl(videoId);
+        return res.status(204).end();
+      } catch (warmErr) {
+        try {
+          const stream = await fetchPipedStreamUrl(videoId);
+          if (stream?.url) cacheStream(videoId, stream.url);
+          return res.status(204).end();
+        } catch (_) {
+          return res.status(204).end();
+        }
+      }
     }
     const url = await getYtDlpAudioUrl(videoId);
     res.setHeader('Accept-Ranges', 'bytes');
+    cacheStream(videoId, url);
     return proxyStream(url, req, res);
   } catch (error) {
     console.error('yt-dlp failed, trying Piped fallback:', error?.message || error);
@@ -863,6 +917,7 @@ app.get('/api/youtube/stream/:id', async (req, res) => {
       res.setHeader('Accept-Ranges', 'bytes');
       if (stream?.url) {
         setCachedYtUrl(videoId, stream.url);
+        cacheStream(videoId, stream.url);
       }
       return proxyStream(stream.url, req, res);
     } catch (fallbackError) {
@@ -873,6 +928,7 @@ app.get('/api/youtube/stream/:id', async (req, res) => {
         res.setHeader('Accept-Ranges', 'bytes');
         if (stream?.url) {
           setCachedYtUrl(videoId, stream.url);
+          cacheStream(videoId, stream.url);
         }
         return proxyStream(stream.url, req, res);
       } catch (invError) {
