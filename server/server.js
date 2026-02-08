@@ -40,6 +40,7 @@ const DEFAULT_UA = process.env.HTTP_UA || 'Mozilla/5.0 (X11; Linux x86_64) Apple
 const SEARCH_CACHE_TTL_MS = Number(process.env.SEARCH_CACHE_TTL_MS || 2 * 60 * 1000);
 const SEARCH_CACHE_MAX = Number(process.env.SEARCH_CACHE_MAX || 200);
 const STREAM_CACHE_MAX = Number(process.env.STREAM_CACHE_MAX || 200);
+const SEARCH_TIMEOUT_MS = Number(process.env.SEARCH_TIMEOUT_MS || 7000);
 const searchCache = new Map();
 
 function isValidYouTubeId(id) {
@@ -113,6 +114,13 @@ function fetchJsonWithTimeout(url, timeoutMs = 5000) {
   return Promise.race([
     fetchJson(url),
     new Promise((_, reject) => setTimeout(() => reject(new Error('Request timeout')), timeoutMs))
+  ]);
+}
+
+function withTimeout(promise, timeoutMs) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error('Operation timeout')), timeoutMs))
   ]);
 }
 
@@ -195,6 +203,15 @@ function proxyStream(url, req, res) {
 function runYtDlp(args) {
   return new Promise((resolve, reject) => {
     execFile('yt-dlp', args, { timeout: 15000 }, (err, stdout) => {
+      if (err) return reject(err);
+      resolve(String(stdout || '').trim());
+    });
+  });
+}
+
+function runYtDlpWithTimeout(args, timeoutMs = 8000) {
+  return new Promise((resolve, reject) => {
+    execFile('yt-dlp', args, { timeout: timeoutMs }, (err, stdout) => {
       if (err) return reject(err);
       resolve(String(stdout || '').trim());
     });
@@ -350,7 +367,7 @@ async function getYtDlpSearchResults(query, limit = 10) {
 
   let output = '';
   try {
-    output = await runYtDlp(args);
+    output = await runYtDlpWithTimeout(args, 7000);
   } catch (err) {
     try {
       output = await runYtDlpViaPython3(args);
@@ -836,36 +853,34 @@ app.get('/api/youtube/search', async (req, res) => {
 
   const apiKey = process.env.YOUTUBE_API_KEY || process.env.VITE_YOUTUBE_API_KEY || '';
   try {
-    if (apiKey) {
-      const apiUrl = `https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&maxResults=${limit}&q=${encodeURIComponent(q)}&key=${apiKey}`;
-      const data = await fetchJson(apiUrl);
-      const items = (data?.items || []).map(it => ({
-        ytId: it?.id?.videoId,
-        title: it?.snippet?.title || 'Unknown',
-        artist: it?.snippet?.channelTitle || 'YouTube',
-        thumbnail: it?.snippet?.thumbnails?.medium?.url || it?.snippet?.thumbnails?.default?.url || ''
-      })).filter(it => it.ytId);
-      setCachedSearch(q, limit, items);
-      return res.json({ items });
-    }
-
-    try {
-      const results = await fetchPipedSearch(q, limit);
-      setCachedSearch(q, limit, results);
-      return res.json({ items: results });
-    } catch (pipedErr) {
-      try {
-        const results = await fetchInvidiousSearch(q, limit);
-        setCachedSearch(q, limit, results);
-        return res.json({ items: results });
-      } catch (invErr) {
-        const results = await getYtDlpSearchResults(q, limit);
-        setCachedSearch(q, limit, results);
-        return res.json({ items: results });
+    const items = await withTimeout((async () => {
+      if (apiKey) {
+        const apiUrl = `https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&maxResults=${limit}&q=${encodeURIComponent(q)}&key=${apiKey}`;
+        const data = await fetchJsonWithTimeout(apiUrl, 6000);
+        return (data?.items || []).map(it => ({
+          ytId: it?.id?.videoId,
+          title: it?.snippet?.title || 'Unknown',
+          artist: it?.snippet?.channelTitle || 'YouTube',
+          thumbnail: it?.snippet?.thumbnails?.medium?.url || it?.snippet?.thumbnails?.default?.url || ''
+        })).filter(it => it.ytId);
       }
-    }
+
+      try {
+        return await fetchPipedSearch(q, limit);
+      } catch (pipedErr) {
+        try {
+          return await fetchInvidiousSearch(q, limit);
+        } catch (invErr) {
+          return await getYtDlpSearchResults(q, limit);
+        }
+      }
+    })(), SEARCH_TIMEOUT_MS);
+
+    setCachedSearch(q, limit, items || []);
+    return res.json({ items: items || [] });
   } catch (error) {
-    return res.status(200).json({ items: [] });
+    const fallback = getCachedSearch(q, limit) || [];
+    return res.status(200).json({ items: fallback });
   }
 });
 

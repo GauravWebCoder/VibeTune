@@ -4491,3 +4491,50 @@ body::before {
     width: 100%;
   }
 }
+
+/* ===== Chat vs Player overlap fix (600-1200px) ===== */
+@media (min-width: 600px) and (max-width: 1200px) {
+  .main-content {
+    padding-bottom: 160px;
+  }
+
+  .room-container {
+    margin-bottom: 140px;
+  }
+
+  .room-sidebar {
+    padding-bottom: 120px;
+  }
+
+  .chat-input {
+    position: sticky;
+    bottom: 0;
+    background: rgba(8, 10, 14, 0.95);
+    padding: 8px 0 6px;
+    z-index: 2;
+  }
+}
+
+/* ===== Player title clamp (600-1200px) ===== */
+@media (max-width: 1200px) {
+  .spotify-song-info {
+    min-width: 0;
+  }
+
+  .spotify-song-details {
+    max-width: min(40vw, 240px);
+  }
+
+  .spotify-song-details h4,
+  .spotify-song-details p {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+}
+
+@media (max-width: 900px) {
+  .spotify-song-details {
+    max-width: min(55vw, 220px);
+  }
+}

@@ -296,6 +296,7 @@ export async function spotifyPlaylist(id, limit = 50) {
 export async function resolveUrlOrSearch(input, source = 'youtube', options = {}) {
   // console.log('🔍 resolveUrlOrSearch called with:', { input, source, options });
   const prefetch = Boolean(options.prefetch);
+  const limit = Number.isFinite(options.limit) ? options.limit : 10;
   // URL detection
   try {
     const u = new URL(input);
@@ -374,7 +375,7 @@ export async function resolveUrlOrSearch(input, source = 'youtube', options = {}
 
   // Plain text search
   if (source === 'youtube') {
-    const list = await searchYouTube(input, 10);
+    const list = await searchYouTube(input, limit);
     if (!prefetch) {
       return list.map(v => ({
         title: v.title,

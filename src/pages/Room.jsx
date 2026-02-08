@@ -1142,6 +1142,12 @@ export default function Room() {
     setIsPlaylistSearch(false);
     
     try {
+      const connection = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+      const effectiveType = connection?.effectiveType || '';
+      const slowConnection = connection?.saveData || ['slow-2g', '2g', '3g'].includes(effectiveType);
+      const smallScreen = window.innerWidth < 720;
+      const limit = slowConnection || smallScreen ? 6 : 10;
+
       const withTimeout = (promise, ms) =>
         Promise.race([
           promise,
@@ -1158,10 +1164,10 @@ export default function Room() {
         setIsPlaylistSearch(filtered.length > 0);
         setSearchVisibleCount(50);
       } else {
-        const results = await withTimeout(resolveUrlOrSearch(searchQuery, 'youtube', { prefetch: false }), 12000);
+        const results = await withTimeout(resolveUrlOrSearch(searchQuery, 'youtube', { prefetch: false, limit }), 12000);
         const filtered = (results || []).filter(r => r?.ytId);
         setSearchResults(filtered);
-        setSearchVisibleCount(10);
+        setSearchVisibleCount(limit);
       }
     } catch (error) {
       // console.error('Search error:', error);
