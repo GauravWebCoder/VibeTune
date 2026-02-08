@@ -1142,24 +1142,30 @@ export default function Room() {
     setIsPlaylistSearch(false);
     
     try {
+      const withTimeout = (promise, ms) =>
+        Promise.race([
+          promise,
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Search timeout')), ms))
+        ]);
+
       const isPlaylist = /list=/.test(searchQuery) || /youtube\.com\/playlist/.test(searchQuery);
       if (isPlaylist) {
         const { fetchYouTubePlaylist, parseYouTubePlaylistId } = await import('../utils/media-resolver');
         const listId = parseYouTubePlaylistId(searchQuery);
-        const results = await fetchYouTubePlaylist(listId, 500);
+        const results = await withTimeout(fetchYouTubePlaylist(listId, 500), 15000);
         const filtered = (results || []).filter(r => r?.ytId);
         setSearchResults(filtered);
         setIsPlaylistSearch(filtered.length > 0);
         setSearchVisibleCount(50);
       } else {
-        const results = await resolveUrlOrSearch(searchQuery, 'youtube', { prefetch: false });
+        const results = await withTimeout(resolveUrlOrSearch(searchQuery, 'youtube', { prefetch: false }), 12000);
         const filtered = (results || []).filter(r => r?.ytId);
         setSearchResults(filtered);
         setSearchVisibleCount(10);
       }
     } catch (error) {
       // console.error('Search error:', error);
-      setSearchError('Search failed. Please try again.');
+      setSearchError('Search failed or timed out. Please try again.');
     } finally {
       setIsSearching(false);
     }

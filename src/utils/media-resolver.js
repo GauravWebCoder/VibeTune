@@ -8,6 +8,17 @@ const API_BASE = (!isDev && typeof import.meta !== 'undefined' && import.meta.en
   : '';
 
 const withApiBase = (path) => API_BASE ? `${API_BASE}${path}` : path;
+const DEFAULT_TIMEOUT = 12000;
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = DEFAULT_TIMEOUT) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 function pickBestAudioStream(audioStreams = []) {
   if (!Array.isArray(audioStreams) || audioStreams.length === 0) return null;
@@ -43,7 +54,7 @@ export async function searchYouTube(query, limit = 10) {
     const url = withApiBase(`/api/youtube/search?q=${encodeURIComponent(query)}&limit=${limit}`);
     // console.log('🔗 YouTube search URL:', url);
     
-    const res = await fetch(url);
+    const res = await fetchWithTimeout(url, {}, 8000);
     // console.log('📡 YouTube search response status:', res.status);
     
     if (res.ok) {
@@ -66,7 +77,7 @@ export async function searchYouTube(query, limit = 10) {
       const url = `https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&maxResults=${limit}&q=${encodeURIComponent(query)}&key=${YT_API_KEY}`;
       // console.log('🔗 YouTube API URL:', url);
       
-      const res = await fetch(url);
+      const res = await fetchWithTimeout(url, {}, 8000);
       // console.log('📡 YouTube API response status:', res.status);
       
       if (!res.ok) {
@@ -97,7 +108,7 @@ export async function searchYouTube(query, limit = 10) {
   const url = `${PIPED_BASE}/api/v1/search?q=${encodeURIComponent(query)}&region=US`;
   // console.log('🔗 Piped URL:', url);
   
-  const res = await fetch(url);
+  const res = await fetchWithTimeout(url, {}, 8000);
   // console.log('📡 Piped response status:', res.status);
   
   if (!res.ok) {
@@ -145,7 +156,7 @@ export async function warmYouTubeAudio(videoId) {
 
 export async function fetchYouTubePlaylist(playlistId, limit = 300) {
   try {
-    const res = await fetch(withApiBase(`/api/youtube/playlist?list=${encodeURIComponent(playlistId)}&limit=${limit}`));
+    const res = await fetchWithTimeout(withApiBase(`/api/youtube/playlist?list=${encodeURIComponent(playlistId)}&limit=${limit}`), {}, 10000);
     if (res.ok) {
       const data = await res.json();
       const items = data?.items || [];
@@ -159,7 +170,7 @@ export async function fetchYouTubePlaylist(playlistId, limit = 300) {
   } catch {}
 
   // Fallback to Piped if server is unavailable
-  const res = await fetch(`${PIPED_BASE}/api/v1/playlists/${playlistId}`);
+  const res = await fetchWithTimeout(`${PIPED_BASE}/api/v1/playlists/${playlistId}`, {}, 10000);
   if (!res.ok) throw new Error('Playlist fetch failed');
   const data = await res.json();
   const videos = data?.videos || data?.relatedStreams || [];
